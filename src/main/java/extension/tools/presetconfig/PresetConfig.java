@@ -5,6 +5,7 @@ import extension.tools.postconfig.PostConfig;
 import extension.tools.presetconfig.ads_bg.PresetAdsBackground;
 import extension.tools.presetconfig.binding.PresetWiredFurniBinding;
 import extension.tools.presetconfig.furni.PresetFurni;
+import extension.tools.presetconfig.furni.PresetWallFurni;
 import extension.tools.presetconfig.wired.PresetWireds;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -18,12 +19,14 @@ import java.util.stream.Collectors;
 public class PresetConfig implements PresetJsonConfigurable {
 
     private List<PresetFurni> furniture;
+    private List<PresetWallFurni> wallFurniture;
     private PresetWireds presetWireds;
     private List<PresetWiredFurniBinding> bindings;
     private List<PresetAdsBackground> adsBackgrounds;
 
-    public PresetConfig(List<PresetFurni> furniture, PresetWireds presetWireds, List<PresetWiredFurniBinding> bindings, List<PresetAdsBackground> adsBackgrounds) {
+    public PresetConfig(List<PresetFurni> furniture, List<PresetWallFurni> wallFurniture, PresetWireds presetWireds, List<PresetWiredFurniBinding> bindings, List<PresetAdsBackground> adsBackgrounds) {
         this.furniture = furniture;
+        this.wallFurniture = wallFurniture;
         this.presetWireds = presetWireds;
         this.bindings = bindings;
         this.adsBackgrounds = adsBackgrounds;
@@ -32,6 +35,10 @@ public class PresetConfig implements PresetJsonConfigurable {
     public PresetConfig(JSONObject object) {
         furniture = object.getJSONArray("furni").toList().stream()
                 .map(o -> new PresetFurni(new JSONObject((Map)o))).collect(Collectors.toList());
+
+        wallFurniture = !object.has("wallFurni") ? new ArrayList<>() :
+                object.getJSONArray("wallFurni").toList().stream()
+                .map(o -> new PresetWallFurni(new JSONObject((Map)o))).collect(Collectors.toList());
 
         presetWireds = new PresetWireds(object.getJSONObject("wired"));
 
@@ -51,6 +58,10 @@ public class PresetConfig implements PresetJsonConfigurable {
         JSONArray jsonBindings = new JSONArray(bindings.stream().map(PresetWiredFurniBinding::toJsonObject).collect(Collectors.toList()));
 
         object.put("furni", jsonFurni);
+        if (!wallFurniture.isEmpty()) {
+            JSONArray jsonWallFurni = new JSONArray(wallFurniture.stream().map(PresetWallFurni::toJsonObject).collect(Collectors.toList()));
+            object.put("wallFurni", jsonWallFurni);
+        }
         object.put("wired", presetWireds.toJsonObject());
         object.put("bindings", jsonBindings);
         if (!adsBackgrounds.isEmpty()) {
@@ -90,6 +101,14 @@ public class PresetConfig implements PresetJsonConfigurable {
 
     public void setFurniture(List<PresetFurni> furniture) {
         this.furniture = furniture;
+    }
+
+    public List<PresetWallFurni> getWallFurniture() {
+        return wallFurniture;
+    }
+
+    public void setWallFurniture(List<PresetWallFurni> wallFurniture) {
+        this.wallFurniture = wallFurniture;
     }
 
     public PresetWireds getPresetWireds() {

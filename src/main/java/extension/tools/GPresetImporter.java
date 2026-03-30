@@ -9,8 +9,10 @@ import extension.tools.presetconfig.PresetConfig;
 import extension.tools.presetconfig.ads_bg.PresetAdsBackground;
 import extension.tools.presetconfig.binding.PresetWiredFurniBinding;
 import extension.tools.presetconfig.furni.PresetFurni;
+import extension.tools.presetconfig.furni.PresetWallFurni;
 import extension.tools.presetconfig.wired.*;
 import furnidata.FurniDataTools;
+import game.BCCatalog;
 import game.FloorState;
 import game.Inventory;
 import gearth.extensions.parsers.HFloorItem;
@@ -20,6 +22,7 @@ import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
 import utils.StateExtractor;
 import utils.Utils;
+import utils.WallPosition;
 
 import java.util.*;
 import java.util.concurrent.Semaphore;
@@ -286,6 +289,7 @@ public class GPresetImporter {
             realFurniIdMap = workingPresetConfig.applyPostConfig(postConfig);
             expectFurniDrops = new HashMap<>();
             inventoryCache.clear();
+            wallInventoryCache.clear();
             rootLocation = null;
 
             // check if user has enough furniture / BC items available (depending on settings)
@@ -414,6 +418,7 @@ public class GPresetImporter {
     }
 
     Map<Integer, LinkedList<HInventoryItem>> inventoryCache = new HashMap<>();
+    Map<String, LinkedList<HInventoryItem>> wallInventoryCache = new HashMap<>();
 
     private void dropFurni(FurniDropInfo dropInfo) {
         FurniDataTools furniData = extension.getFurniDataTools();
@@ -772,11 +777,134 @@ public class GPresetImporter {
 
         }
 
+        // Place wall items
+        if (state == BuildingImportState.MOVE_FURNITURE) {
+            placeWallItems();
+        }
+
         synchronized (lock) {
             if (state == BuildingImportState.MOVE_FURNITURE) {
                 state = BuildingImportState.NONE;
                 extension.sendVisualChatInfo("Imported the preset successfully");
                 extension.getLogger().log("Finished importing the preset!", "green");
+            }
+        }
+    }
+
+    private void placeWallItems() {
+        List<PresetWallFurni> wallFurniture = workingPresetConfig.getWallFurniture();
+        if (wallFurniture == null || wallFurniture.isEmpty()) return;
+
+        extension.sendVisualChatInfo("Placing wall items..");
+        FurniDataTools furniData = extension.getFurniDataTools();
+        Inventory inventory = extension.getInventory();
+        BCCatalog catalog = extension.getCatalog();
+        ItemSource source = postConfig.getItemSource();
+
+        for (PresetWallFurni wallFurni : wallFurniture) {
+            if (state != BuildingImportState.MOVE_FURNITURE) break;
+
+            String className = wallFurni.getClassName();
+            String wallState = wallFurni.getState() != null ? wallFurni.getState() : "";
+            Integer typeId = furniData.getWallTypeId(className);
+            if (typeId == null) {
+                extension.sendVisualChatInfo(String.format("WARNING: Unknown wall item '%s', skipping", className));
+                continue;
+            }
+
+            // Calculate the absolute wall position
+            WallPosition relPos = wallFurni.getLocation();
+            int absX = relPos.getX() + rootLocation.getX();
+            int absY = relPos.getY() + rootLocation.getY();
+            int absAltitude = relPos.getAltitude() + heightOffset * 100;
+
+            WallPosition absPos = new WallPosition(
+                    absX, absY,
+                    relPos.getOffsetX(), relPos.getOffsetY(),
+                    relPos.getDirection(), absAltitude
+            );
+
+            String locationString = absPos.toString();
+
+            // For inventory: build a cache key that includes state for variant matching
+            String invCacheKey = typeId + ":" + wallState;
+            LinkedList<HInventoryItem> inventoryItems = wallInventoryCache.computeIfAbsent(
+                    invCacheKey, k -> {
+                        List<HInventoryItem> allOfType = inventory.getWallItemsByType(typeId);
+                        // Filter by state if the wall item has a specific state
+                        if (!wallState.isEmpty()) {
+                            return allOfType.stream()
+                                    .filter(item -> {
+                                        try {
+                                            String itemState = item.getStuff() != null ? item.getStuff().getLegacyString() : "";
+                                            return wallState.equals(itemState);
+                                        } catch (Exception e) {
+                                            return false;
+                                        }
+                                    })
+                                    .collect(Collectors.toCollection(LinkedList::new));
+                        }
+                        return new LinkedList<>(allOfType);
+                    }
+            );
+
+            // For BC: look up the correct offerId from catalog (supports variants)
+            BCCatalog.SingleFurniProduct bcProduct = null;
+            if (catalog != null && catalog.getState() == BCCatalog.CatalogState.COLLECTED) {
+                bcProduct = catalog.getWallProduct(typeId, wallState);
+            }
+
+            // Fallback to furnidata offerId if catalog not available
+            int offerId = bcProduct != null ? bcProduct.getOfferId() : -1;
+            int pageId = bcProduct != null ? bcProduct.getPageId() : -1;
+            if (offerId == -1 && furniData.getWallItemDetails(className) != null) {
+                offerId = furniData.getWallItemDetails(className).offerId;
+                pageId = -1;
+            }
+
+            boolean useBC = source == ItemSource.ONLY_BC || (source == ItemSource.PREFER_BC && offerId != -1)
+                    || (source == ItemSource.PREFER_INVENTORY && inventoryItems.isEmpty());
+
+            if (useBC) {
+                if (offerId == -1) {
+                    if (!extension.allowIncompleteBuilds()) {
+                        state = BuildingImportState.NONE;
+                        extension.sendVisualChatInfo(String.format("ERROR: Couldn't find wall item '%s' in BC catalog.. aborting", className));
+                    } else {
+                        extension.sendVisualChatInfo(String.format("Couldn't find wall item '%s' in BC catalog.. continuing", className));
+                    }
+                    continue;
+                }
+                extension.sendToServer(new HPacket(
+                        "BuildersClubPlaceWallItem",
+                        HMessage.Direction.TOSERVER,
+                        pageId,
+                        offerId,
+                        wallState,
+                        locationString,
+                        false
+                ));
+                Utils.sleep(230);
+            } else {
+                if (inventoryItems.isEmpty()) {
+                    if (!extension.allowIncompleteBuilds()) {
+                        extension.sendVisualChatInfo(String.format("ERROR: Couldn't find wall item '%s' (state=%s) in inventory.. aborting", className, wallState));
+                        state = BuildingImportState.NONE;
+                        return;
+                    }
+                    extension.sendVisualChatInfo(String.format("Couldn't find wall item '%s' (state=%s) in inventory.. continuing", className, wallState));
+                    continue;
+                }
+
+                HInventoryItem item = inventoryItems.pollFirst();
+
+                extension.sendToServer(new HPacket(
+                        "PlaceObject",
+                        HMessage.Direction.TOSERVER,
+                        "-" + item.getId() + " " + locationString
+                ));
+
+                Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
             }
         }
     }

@@ -11,6 +11,7 @@ import extension.tools.presetconfig.PresetConfig;
 import extension.tools.presetconfig.PresetConfigUtils;
 import extension.tools.presetconfig.furni.PresetFurni;
 import furnidata.FurniDataTools;
+import game.BCCatalog;
 import game.FloorState;
 import game.Inventory;
 import game.RoomPermissions;
@@ -63,6 +64,7 @@ public class GPresets extends ExtensionForm {
     public Label cndStackTileLbl;
     public Label cndFurnidataLbl;
     public Label cndPermissionsLbl;
+    public Label cndBCShopLbl;
 
     public ToggleGroup stacktile_tgl;
 
@@ -101,6 +103,7 @@ public class GPresets extends ExtensionForm {
     private Inventory inventory = null;
     private FloorState floorState = null;
     private RoomPermissions permissions = null;
+    private BCCatalog catalog = null;
     private volatile boolean isConnected = false;
 
     private GPresetExporter exporter = null;
@@ -215,6 +218,8 @@ public class GPresets extends ExtensionForm {
         });
         this.inventory = new Inventory(this, logger, this::updateUI);
         this.permissions = new RoomPermissions(this, logger, this::updateUI);
+
+        this.catalog = new BCCatalog(this, logger, this::updateUI);
 
         this.exporter = new GPresetExporter(this);
         this.importer = new GPresetImporter(this);
@@ -353,9 +358,9 @@ public class GPresets extends ExtensionForm {
 //                && stackTile() != null;
 //    }
 //
-//    private boolean BCCatalogAvailable() {
-//        return catalog.getState() == BCCatalog.CatalogState.COLLECTED;
-//    }
+    private boolean BCCatalogAvailable() {
+        return catalog.getState() == BCCatalog.CatalogState.COLLECTED;
+    }
 
     private void updateLabel(Label lbl, boolean isFullfilled, boolean isBusy, boolean isOptional) {
         lbl.getStyleClass().removeAll(lbl.getStyleClass().stream().filter(p -> p.startsWith("lbl")).collect(Collectors.toList()));
@@ -380,6 +385,8 @@ public class GPresets extends ExtensionForm {
             updateLabel(cndInventoryLbl, inventory.getState() == Inventory.InventoryState.LOADED,
                     inventory.getState() == Inventory.InventoryState.LOADING);
             updateLabel(cndStackTileLbl, stackTile() != null);
+            updateLabel(cndBCShopLbl, catalog.getState() == BCCatalog.CatalogState.COLLECTED,
+                    catalog.getState() == BCCatalog.CatalogState.COLLECTING_PAGES);
             updateLabel(cndPermissionsLbl, permissions.canMoveFurni() && (noExportWiredCbx.isSelected() || permissions.canModifyWired()));
 
             availabilityBtn.setDisable(importer.getPresetConfig() == null);
@@ -404,6 +411,14 @@ public class GPresets extends ExtensionForm {
         inventory.requestInventory();
     }
 
+    public void loadBCClick(ActionEvent actionEvent) {
+        catalog.requestIndex();
+    }
+
+    public void clearBCClick(ActionEvent actionEvent) throws URISyntaxException {
+        catalog.clearCache();
+    }
+
     public FurniDataTools getFurniDataTools() {
         return furniDataTools;
     }
@@ -414,6 +429,10 @@ public class GPresets extends ExtensionForm {
 
     public Inventory getInventory() {
         return inventory;
+    }
+
+    public BCCatalog getCatalog() {
+        return catalog;
     }
 
     public FloorState getFloorState() {

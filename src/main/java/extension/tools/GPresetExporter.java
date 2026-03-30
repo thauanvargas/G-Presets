@@ -8,22 +8,26 @@ import extension.tools.presetconfig.PresetConfigUtils;
 import extension.tools.presetconfig.ads_bg.PresetAdsBackground;
 import extension.tools.presetconfig.binding.PresetWiredFurniBinding;
 import extension.tools.presetconfig.furni.PresetFurni;
+import extension.tools.presetconfig.furni.PresetWallFurni;
 import extension.tools.presetconfig.wired.*;
 import extension.tools.presetconfig.wired.incoming.*;
 import furnidata.FurniDataTools;
 import game.FloorState;
 import gearth.extensions.parsers.HFloorItem;
 import gearth.extensions.parsers.HPoint;
+import gearth.extensions.parsers.HWallItem;
 import gearth.extensions.parsers.stuffdata.MapStuffData;
 import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
 import utils.StateExtractor;
 import utils.Utils;
+import utils.WallPosition;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class GPresetExporter {
 
@@ -323,6 +327,7 @@ public class GPresetExporter {
             FurniDataTools furniDataTools = extension.getFurniDataTools();
 
             List<PresetFurni> allFurni = new ArrayList<>();
+            List<PresetWallFurni> allWallFurni = new ArrayList<>();
             List<PresetWiredCondition> allConditions = new ArrayList<>();
             List<PresetWiredEffect> allEffects = new ArrayList<>();
             List<PresetWiredTrigger> allTriggers = new ArrayList<>();
@@ -390,13 +395,30 @@ public class GPresetExporter {
                             }
                         }
                     }
+
+                    // Collect wall items on this tile
+                    List<HWallItem> wallItems = floor.getWallFurniOnTile(xi, yi);
+                    for (HWallItem f : wallItems) {
+                        String classname = furniDataTools.getWallItemName(f.getTypeId());
+
+                        PresetWallFurni presetWallFurni = new PresetWallFurni(
+                                f.getId(),
+                                classname,
+                                new WallPosition(f.getLocation()),
+                                f.getState()
+                        );
+                        allWallFurni.add(presetWallFurni);
+                    }
                 }
             }
 
 
 
-            // second pass: filter wired furni selections & bindings to only contain items in allFurni
-            Set<Integer> allFurniIds = allFurni.stream().map(PresetFurni::getFurniId).collect(Collectors.toSet());
+            // second pass: filter wired furni selections & bindings to only contain items in allFurni or allWallFurni
+            Set<Integer> allFurniIds = Stream.concat(
+                    allFurni.stream().map(PresetFurni::getFurniId),
+                    allWallFurni.stream().map(PresetWallFurni::getFurniId)
+            ).collect(Collectors.toSet());
 
             wiredLists.forEach(l -> l.forEach((Consumer<PresetWiredBase>) w -> {
                 w.setItems(w.getItems().stream().filter(allFurniIds::contains).collect(Collectors.toList()));
@@ -414,7 +436,10 @@ public class GPresetExporter {
                     new HPoint(x + dimX, y + dimY)
             );
             Map<Integer, Integer> mappedFurniIds = new HashMap<>();
-            List<Integer> orderedFurniIds = allFurni.stream().map(PresetFurni::getFurniId).collect(Collectors.toList());
+            List<Integer> orderedFurniIds = Stream.concat(
+                    allFurni.stream().map(PresetFurni::getFurniId),
+                    allWallFurni.stream().map(PresetWallFurni::getFurniId)
+            ).collect(Collectors.toList());
             for (int i = 0; i < orderedFurniIds.size(); i++) {
                 mappedFurniIds.put(orderedFurniIds.get(i), i + 1);
             }
@@ -426,6 +451,18 @@ public class GPresetExporter {
                         oldLocation.getX() - x,
                         oldLocation.getY() - y,
                         oldLocation.getZ() - lowestFloorPoint
+                ));
+            });
+            allWallFurni.forEach(presetWallFurni -> {
+                presetWallFurni.setFurniId(mappedFurniIds.get(presetWallFurni.getFurniId()));
+                WallPosition oldLocation = presetWallFurni.getLocation();
+                presetWallFurni.setLocation(new WallPosition(
+                        oldLocation.getX() - x,
+                        oldLocation.getY() - y,
+                        oldLocation.getOffsetX(),
+                        oldLocation.getOffsetY(),
+                        oldLocation.getDirection(),
+                        oldLocation.getAltitude() - 100 * lowestFloorPoint
                 ));
             });
             wiredLists.forEach(l -> l.forEach((Consumer<PresetWiredBase>) w -> {
@@ -473,11 +510,22 @@ public class GPresetExporter {
                     presetFurni.setState(null);
                 }
             });
+            allWallFurni.forEach(presetWallFurni -> {
+                String className = presetWallFurni.getClassName();
+                if (!classToCount.containsKey(className)) {
+                    classToCount.put(className, 0);
+                }
+                int number = classToCount.get(className);
+                classToCount.put(className, number + 1);
+
+                String furniName = String.format("%s[%d]", className, number);
+                presetWallFurni.setFurniName(furniName);
+            });
 
 
 
             PresetWireds presetWireds = new PresetWireds(allConditions, allEffects, allTriggers, allAddons, allSelectors, allVariables, variablesMap);
-            PresetConfig presetConfig = new PresetConfig(allFurni, presetWireds, allBindings, allAdsBackgrounds);
+            PresetConfig presetConfig = new PresetConfig(allFurni, allWallFurni, presetWireds, allBindings, allAdsBackgrounds);
 
             PresetConfigUtils.savePreset(name, presetConfig);
             extension.updateInstalledPresets();

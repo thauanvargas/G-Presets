@@ -6,10 +6,12 @@ import gearth.extensions.ExtensionBase;
 import gearth.extensions.IExtension;
 import gearth.extensions.parsers.HFloorItem;
 import gearth.extensions.parsers.HPoint;
+import gearth.extensions.parsers.HWallItem;
 import gearth.extensions.parsers.stuffdata.IStuffData;
 import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
 import utils.Callback;
+import utils.WallPosition;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -31,6 +33,11 @@ public class FloorState {
     private volatile List<List<Map<Integer, HFloorItem>>> furnimap = null;
     private volatile char[][] floorplan = null;
 
+    // Wall item tracking
+    private volatile Map<Integer, HWallItem> wallIdToItem = null;
+    private volatile Map<Integer, Set<HWallItem>> wallTypeIdToItems = null;
+    private volatile List<List<Map<Integer, HWallItem>>> wallmap = null;
+
 
     private volatile Map<Integer, Set<Consumer<HFloorItem>>> stateUpdateListeners = new HashMap<>();
 
@@ -50,6 +57,13 @@ public class FloorState {
 
         extension.intercept(HMessage.Direction.TOCLIENT, "ObjectDataUpdate", this::onDataUpdate);
         extension.intercept(HMessage.Direction.TOCLIENT, "ObjectsDataUpdate", this::onDataUpdates);
+
+        // Wall item intercepts
+        extension.intercept(HMessage.Direction.TOCLIENT, "Items", this::parseWallItems);
+        extension.intercept(HMessage.Direction.TOCLIENT, "ItemAdd", this::onWallItemAdd);
+        extension.intercept(HMessage.Direction.TOCLIENT, "ItemRemove", this::onWallItemRemove);
+        extension.intercept(HMessage.Direction.TOCLIENT, "ItemUpdate", this::onWallItemUpdate);
+        extension.intercept(HMessage.Direction.TOCLIENT, "ItemDataUpdate", this::onWallDataUpdate);
 
         extension.intercept(HMessage.Direction.TOCLIENT, "HeightMap", this::parseHeightmap);
         extension.intercept(HMessage.Direction.TOCLIENT, "HeightMapUpdate", this::heightmapUpdate);
@@ -97,16 +111,19 @@ public class FloorState {
     }
 
     public boolean inRoom() {
-        return furnimap != null && floorplan != null && heightmap != null && roomId != 0;
+        return furnimap != null && wallmap != null && floorplan != null && heightmap != null && roomId != 0;
     }
     public void reset() {
-        if (heightmap != null || furnimap != null || floorplan != null) {
+        if (heightmap != null || furnimap != null || floorplan != null || wallmap != null) {
             synchronized (lock) {
                 heightmap = null;
                 furniIdToItem = null;
                 furnimap = null;
                 floorplan = null;
                 typeIdToItems = null;
+                wallIdToItem = null;
+                wallTypeIdToItems = null;
+                wallmap = null;
                 roomId = 0;
             }
             onRoomLeave.call();
@@ -439,6 +456,131 @@ public class FloorState {
         synchronized (lock) {
             if (inRoom()) {
                 return new ArrayList<>(furniIdToItem.values());
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    // Wall item methods
+
+    private void parseWallItems(HMessage hMessage) {
+        HWallItem[] wallItems = HWallItem.parse(hMessage.getPacket());
+
+        synchronized (lock) {
+            if (wallmap == null) {
+                wallIdToItem = new HashMap<>();
+                wallmap = new ArrayList<>();
+                wallTypeIdToItems = new HashMap<>();
+
+                for (int i = 0; i < 130; i++) {
+                    wallmap.add(new ArrayList<>());
+                    for (int j = 0; j < 130; j++) {
+                        wallmap.get(i).add(new HashMap<>());
+                    }
+                }
+            }
+
+            Arrays.stream(wallItems).forEach(this::addWallItem);
+        }
+
+        onFloorStateChange.call();
+        logger.log("Parsed wall items", "blue");
+    }
+
+    private void onWallItemRemove(HMessage hMessage) {
+        if (wallmap != null) {
+            HPacket packet = hMessage.getPacket();
+            int itemId = Integer.parseInt(packet.readString());
+            removeWallItem(itemId);
+            onFloorStateChange.call();
+        }
+    }
+
+    private void removeWallItem(int itemId) {
+        synchronized (lock) {
+            HWallItem item = wallIdToItem.remove(itemId);
+            if (item != null) {
+                WallPosition pos = new WallPosition(item.getLocation());
+                wallmap.get(pos.getX()).get(pos.getY()).remove(item.getId());
+                if (wallTypeIdToItems.containsKey(item.getTypeId())) {
+                    wallTypeIdToItems.get(item.getTypeId()).remove(item);
+                }
+            }
+        }
+    }
+
+    private void onWallItemAdd(HMessage hMessage) {
+        if (wallmap != null) {
+            synchronized (lock) {
+                HWallItem item = new HWallItem(hMessage.getPacket());
+                String ownerName = hMessage.getPacket().readString();
+                item.setOwnerName(ownerName);
+                addWallItem(item);
+            }
+            onFloorStateChange.call();
+        }
+    }
+
+    private void addWallItem(HWallItem item) {
+        WallPosition pos = new WallPosition(item.getLocation());
+        wallmap.get(pos.getX()).get(pos.getY()).put(item.getId(), item);
+        wallIdToItem.put(item.getId(), item);
+        if (!wallTypeIdToItems.containsKey(item.getTypeId())) {
+            wallTypeIdToItems.put(item.getTypeId(), new HashSet<>());
+        }
+        wallTypeIdToItems.get(item.getTypeId()).add(item);
+    }
+
+    private void onWallItemUpdate(HMessage hMessage) {
+        if (wallmap != null) {
+            HWallItem newItem = new HWallItem(hMessage.getPacket());
+
+            HWallItem old = wallIdToItem.get(newItem.getId());
+            String owner = "";
+            if (old != null) {
+                owner = old.getOwnerName();
+            }
+
+            removeWallItem(newItem.getId());
+            hMessage.getPacket().resetReadIndex();
+            HWallItem item = new HWallItem(hMessage.getPacket());
+            item.setOwnerName(owner);
+            synchronized (lock) {
+                addWallItem(item);
+            }
+        }
+    }
+
+    private void onWallDataUpdate(HMessage hMessage) {
+        HPacket packet = hMessage.getPacket();
+        int id = Integer.parseInt(packet.readString());
+        synchronized (lock) {
+            HWallItem item = wallIdToItem != null ? wallIdToItem.get(id) : null;
+            if (item != null) {
+                item.setState(packet.readString());
+            }
+        }
+    }
+
+    public HWallItem wallItemFromId(int id) {
+        synchronized (lock) {
+            return wallIdToItem != null ? wallIdToItem.get(id) : null;
+        }
+    }
+
+    public List<HWallItem> getWallFurniOnTile(int x, int y) {
+        synchronized (lock) {
+            if (wallmap != null && x >= 0 && y >= 0 && x < wallmap.size() && y < wallmap.get(x).size()) {
+                return new ArrayList<>(wallmap.get(x).get(y).values());
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    public List<HWallItem> getWallItems() {
+        synchronized (lock) {
+            if (wallIdToItem != null) {
+                return new ArrayList<>(wallIdToItem.values());
             }
         }
         return new ArrayList<>();
