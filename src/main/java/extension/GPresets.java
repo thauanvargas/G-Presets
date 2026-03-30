@@ -10,6 +10,7 @@ import extension.tools.postconfig.PostConfig;
 import extension.tools.presetconfig.PresetConfig;
 import extension.tools.presetconfig.PresetConfigUtils;
 import extension.tools.presetconfig.furni.PresetFurni;
+import extension.tools.presetconfig.furni.PresetWallFurni;
 import furnidata.FurniDataTools;
 import game.BCCatalog;
 import game.FloorState;
@@ -50,8 +51,8 @@ import java.util.stream.Collectors;
 
 @ExtensionInfo(
         Title =  "G-Presets",
-        Description =  "Never do anything twice",
-        Version =  "1.2.10",
+        Description =  "Never do anything twice mod. by TH",
+        Version =  "1.3",
         Author =  "sirjonasxx"
 )
 public class GPresets extends ExtensionForm {
@@ -94,6 +95,7 @@ public class GPresets extends ExtensionForm {
     public Slider ratelimiter;
     public CheckBox onTopCbx;
     public CheckBox useRoomFurniCbx;
+    public CheckBox noExportWallItemsCbx;
 
     private List<FurniPostConfig> furniPostConfigs = new ArrayList<>();
 
@@ -127,6 +129,7 @@ public class GPresets extends ExtensionForm {
         logger.log("Welcome to G-Presets!", "purple");
         logger.log("Use the following commands:", "purple");
         logger.log("* :exportpreset [all] / :ep [all]", "purple");
+        logger.log("* :exportpresetwalls / :epw", "purple");
         logger.log("* :importpreset [x,y] / :ip [x,y]", "purple");
         logger.log("* :abort / :a", "purple");
 
@@ -149,6 +152,10 @@ public class GPresets extends ExtensionForm {
 
         allowIncompleteBuildsCbx.selectedProperty().addListener(observable ->
                 Cacher.put("allowIncompleteBuilds", allowIncompleteBuildsCbx.isSelected())
+        );
+
+        noExportWallItemsCbx.selectedProperty().addListener(observable ->
+                Cacher.put("noExportWallItems", noExportWallItemsCbx.isSelected())
         );
 
         useRoomFurniCbx.selectedProperty().addListener(observable ->
@@ -309,6 +316,7 @@ public class GPresets extends ExtensionForm {
         Utils.setExtraSleepTime(cache.optInt("ratelimit", 22));
 
         noExportWiredCbx.setSelected(cache.optBoolean("noExportWired"));
+        noExportWallItemsCbx.setSelected(cache.optBoolean("noExportWallItems"));
         allowIncompleteBuildsCbx.setSelected(cache.optBoolean("allowIncompleteBuilds"));
         useRoomFurniCbx.setSelected(cache.optBoolean("useRoomFurni"));
     }
@@ -379,14 +387,20 @@ public class GPresets extends ExtensionForm {
 
     private void updateUI() {
         Platform.runLater(() -> {
+            boolean presetHasWallItems = importer.getPresetConfig() != null
+                    && importer.getPresetConfig().getWallFurniture() != null
+                    && !importer.getPresetConfig().getWallFurniture().isEmpty();
+            boolean presetHasFloorItems = importer.getPresetConfig() != null
+                    && !importer.getPresetConfig().getFurniture().isEmpty();
+
             updateLabel(cndConnectedLbl, isConnected);
             updateLabel(cndRoomLbl, floorState.inRoom());
             updateLabel(cndFurnidataLbl, furniDataReady());
             updateLabel(cndInventoryLbl, inventory.getState() == Inventory.InventoryState.LOADED,
                     inventory.getState() == Inventory.InventoryState.LOADING);
-            updateLabel(cndStackTileLbl, stackTile() != null);
+            updateLabel(cndStackTileLbl, stackTile() != null, false, !presetHasFloorItems);
             updateLabel(cndBCShopLbl, catalog.getState() == BCCatalog.CatalogState.COLLECTED,
-                    catalog.getState() == BCCatalog.CatalogState.COLLECTING_PAGES);
+                    catalog.getState() == BCCatalog.CatalogState.COLLECTING_PAGES, !presetHasWallItems);
             updateLabel(cndPermissionsLbl, permissions.canMoveFurni() && (noExportWiredCbx.isSelected() || permissions.canModifyWired()));
 
             availabilityBtn.setDisable(importer.getPresetConfig() == null);
@@ -482,6 +496,7 @@ public class GPresets extends ExtensionForm {
             }
 
             AvailabilityChecker.printAvailability(logger, fakeDropInfo, inventory, furniDataTools, floorState, useRoomFurni());
+            AvailabilityChecker.printWallItemAvailability(logger, combined.getWallFurniture(), inventory, furniDataTools, catalog, postConfig.getItemSource());
         }
         else {
             logger.log("No preset chosen or furnidata not ready", "red");
@@ -573,6 +588,10 @@ public class GPresets extends ExtensionForm {
 
     public boolean shouldExportWired() {
         return !noExportWiredCbx.isSelected();
+    }
+
+    public boolean shouldExportWallItems() {
+        return !noExportWallItemsCbx.isSelected();
     }
 
     public GPresetExporter getExporter() {

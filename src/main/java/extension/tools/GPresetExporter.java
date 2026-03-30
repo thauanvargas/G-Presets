@@ -46,6 +46,7 @@ public class GPresetExporter {
     private volatile HPoint rectCorner1 = null;
     private volatile HPoint rectCorner2 = null;
     private volatile String exportName = null;
+    private volatile boolean wallOnlyExport = false;
 
     private volatile PresetExportState state = PresetExportState.NONE;
 
@@ -146,11 +147,26 @@ public class GPresetExporter {
                 } else if (!isReady()) {
                     extension.sendVisualChatInfo("Error: no room detected or furnidata not available");
                 } else if (text.equals(":ep") || text.equals(":exportpreset")) {
+                    wallOnlyExport = false;
                     state = PresetExportState.AWAITING_RECT1;
                     extension.sendVisualChatInfo("Select the start of the rectangle");
                 } else {
-                    // export all
+                    wallOnlyExport = false;
                     rectCorner1 = new HPoint(0,0 );
+                    rectCorner2 = new HPoint(100, 100);
+                    state = PresetExportState.AWAITING_NAME;
+                    extension.sendVisualChatInfo("Enter the name of the preset");
+                }
+            } else if(text.equals(":epw") || text.equals(":exportpresetwalls")) {
+                hMessage.setBlocked(true);
+
+                if (state != PresetExportState.NONE) {
+                    extension.sendVisualChatInfo("Already exporting preset.. finish up or abort first");
+                } else if (!isReady()) {
+                    extension.sendVisualChatInfo("Error: no room detected or furnidata not available");
+                } else {
+                    wallOnlyExport = true;
+                    rectCorner1 = new HPoint(0, 0);
                     rectCorner2 = new HPoint(100, 100);
                     state = PresetExportState.AWAITING_NAME;
                     extension.sendVisualChatInfo("Enter the name of the preset");
@@ -291,6 +307,7 @@ public class GPresetExporter {
         rectCorner1 = null;
         rectCorner2 = null;
         exportName = null;
+        wallOnlyExport = false;
         state = PresetExportState.NONE;
     }
 
@@ -322,7 +339,7 @@ public class GPresetExporter {
     }
 
     private void export(String name, int x, int y, int dimX, int dimY) {
-        if (isReady() && (unRegisteredWiredsInArea(x, y, dimX, dimY).size() == 0 || !extension.shouldExportWired())) {
+        if (isReady() && (wallOnlyExport || unRegisteredWiredsInArea(x, y, dimX, dimY).size() == 0 || !extension.shouldExportWired())) {
             FloorState floor = extension.getFloorState();
             FurniDataTools furniDataTools = extension.getFurniDataTools();
 
@@ -340,75 +357,80 @@ public class GPresetExporter {
 
 
 
-            // first pass: fill all items with copies
-            for (int xi = x; xi < x + dimX; xi++) {
-                for (int yi = y; yi < y + dimY; yi++) {
-                    List<HFloorItem> items = floor.getFurniOnTile(xi, yi);
-                    for (HFloorItem f : items) {
-                        String classname = furniDataTools.getFloorItemName(f.getTypeId());
+            if (!wallOnlyExport) {
+                // first pass: fill all items with copies
+                for (int xi = x; xi < x + dimX; xi++) {
+                    for (int yi = y; yi < y + dimY; yi++) {
+                        List<HFloorItem> items = floor.getFurniOnTile(xi, yi);
+                        for (HFloorItem f : items) {
+                            String classname = furniDataTools.getFloorItemName(f.getTypeId());
 
-                        PresetFurni presetFurni = new PresetFurni(f.getId(), classname, f.getTile(),
-                                f.getFacing().ordinal(), StateExtractor.stateFromItem(f));
-                        allFurni.add(presetFurni);
+                            PresetFurni presetFurni = new PresetFurni(f.getId(), classname, f.getTile(),
+                                    f.getFacing().ordinal(), StateExtractor.stateFromItem(f));
+                            allFurni.add(presetFurni);
 
-                        if (classname.equals("ads_background") && f.getStuff() instanceof MapStuffData) {
-                            Map<String, String> stuffDataMap = (MapStuffData) f.getStuff();
-                            allAdsBackgrounds.add(new PresetAdsBackground(
-                                    f.getId(),
-                                    stuffDataMap.get("imageUrl"),
-                                    stuffDataMap.get("offsetX"),
-                                    stuffDataMap.get("offsetY"),
-                                    stuffDataMap.get("offsetZ")
-                            ));
-                        }
+                            if (classname.equals("ads_background") && f.getStuff() instanceof MapStuffData) {
+                                Map<String, String> stuffDataMap = (MapStuffData) f.getStuff();
+                                allAdsBackgrounds.add(new PresetAdsBackground(
+                                        f.getId(),
+                                        stuffDataMap.get("imageUrl"),
+                                        stuffDataMap.get("offsetX"),
+                                        stuffDataMap.get("offsetY"),
+                                        stuffDataMap.get("offsetZ")
+                                ));
+                            }
 
-                        if (extension.shouldExportWired()) {
-                            String key = wiredCacheKey(f.getId());
+                            if (extension.shouldExportWired()) {
+                                String key = wiredCacheKey(f.getId());
 
-                            if (classname.startsWith("wf_trg_")) {
-                                allTriggers.add(new PresetWiredTrigger(wiredTriggerConfigs.get(key)));
-                            }
-                            else if (classname.startsWith("wf_cnd_")) {
-                                allConditions.add(new PresetWiredCondition(wiredConditionConfigs.get(key)));
-                            }
-                            else if (classname.startsWith("wf_act_")) {
-                                allEffects.add(new PresetWiredEffect(wiredEffectConfigs.get(key)));
-                            }
-                            else if (classname.startsWith("wf_xtra_")) {
-                                allAddons.add(new PresetWiredAddon(wiredAddonConfigs.get(key)));
-                            }
-                            else if (classname.startsWith("wf_slc_")) {
-                                allSelectors.add(new PresetWiredSelector(wiredSelectorConfigs.get(key)));
-                            }
-                            else if (classname.startsWith("wf_var_")) {
-                                PresetWiredVariable presetVariable = new PresetWiredVariable(wiredVariableConfigs.get(key));
-                                if(hasVariableMap && (presetVariable.variableId == null || presetVariable.variableId.equals("0"))) {
-                                    Optional<Map.Entry<String, String>> op = variablesMap.entrySet().stream().filter(k -> k.getKey().equals(presetVariable.getStringConfig())).findFirst();
-                                    op.ifPresent(stringStringEntry -> presetVariable.variableId = stringStringEntry.getValue());
+                                if (classname.startsWith("wf_trg_")) {
+                                    allTriggers.add(new PresetWiredTrigger(wiredTriggerConfigs.get(key)));
                                 }
-                                allVariables.add(presetVariable);
-                            }
+                                else if (classname.startsWith("wf_cnd_")) {
+                                    allConditions.add(new PresetWiredCondition(wiredConditionConfigs.get(key)));
+                                }
+                                else if (classname.startsWith("wf_act_")) {
+                                    allEffects.add(new PresetWiredEffect(wiredEffectConfigs.get(key)));
+                                }
+                                else if (classname.startsWith("wf_xtra_")) {
+                                    allAddons.add(new PresetWiredAddon(wiredAddonConfigs.get(key)));
+                                }
+                                else if (classname.startsWith("wf_slc_")) {
+                                    allSelectors.add(new PresetWiredSelector(wiredSelectorConfigs.get(key)));
+                                }
+                                else if (classname.startsWith("wf_var_")) {
+                                    PresetWiredVariable presetVariable = new PresetWiredVariable(wiredVariableConfigs.get(key));
+                                    if(hasVariableMap && (presetVariable.variableId == null || presetVariable.variableId.equals("0"))) {
+                                        Optional<Map.Entry<String, String>> op = variablesMap.entrySet().stream().filter(k -> k.getKey().equals(presetVariable.getStringConfig())).findFirst();
+                                        op.ifPresent(stringStringEntry -> presetVariable.variableId = stringStringEntry.getValue());
+                                    }
+                                    allVariables.add(presetVariable);
+                                }
 
-                            if (wiredFurniBindings.containsKey(key)) {
-                                allBindings.addAll(wiredFurniBindings.get(key).stream()
-                                        .map(b -> new PresetWiredFurniBinding(b)).collect(Collectors.toList()));
+                                if (wiredFurniBindings.containsKey(key)) {
+                                    allBindings.addAll(wiredFurniBindings.get(key).stream()
+                                            .map(b -> new PresetWiredFurniBinding(b)).collect(Collectors.toList()));
+                                }
                             }
                         }
                     }
+                }
+            }
 
-                    // Collect wall items on this tile
-                    List<HWallItem> wallItems = floor.getWallFurniOnTile(xi, yi);
-                    for (HWallItem f : wallItems) {
-                        String classname = furniDataTools.getWallItemName(f.getTypeId());
+            if (!extension.shouldExportWallItems() && !wallOnlyExport) {
+                // skip wall items
+            } else {
+                List<HWallItem> wallItems = floor.getWallItems();
+                for (HWallItem f : wallItems) {
+                    String classname = furniDataTools.getWallItemName(f.getTypeId());
 
-                        PresetWallFurni presetWallFurni = new PresetWallFurni(
-                                f.getId(),
-                                classname,
-                                new WallPosition(f.getLocation()),
-                                f.getState()
-                        );
-                        allWallFurni.add(presetWallFurni);
-                    }
+                    PresetWallFurni presetWallFurni = new PresetWallFurni(
+                            f.getId(),
+                            classname,
+                            new WallPosition(f.getLocation()),
+                            f.getState()
+                    );
+                    allWallFurni.add(presetWallFurni);
                 }
             }
 
@@ -724,6 +746,10 @@ public class GPresetExporter {
 
     private void attemptExport(String name, int x, int y, int dimX, int dimY) {
         if (isReady()) {
+            if (wallOnlyExport) {
+                export(name, x, y, dimX, dimY);
+                return;
+            }
             List<Integer> unregisteredWired = unRegisteredWiredsInArea(x, y, dimX, dimY);
             if (((!hasVariableMap && hasWiredVariables()) || unregisteredWired.size() > 0) && extension.shouldExportWired()) {
                 exportName = name;

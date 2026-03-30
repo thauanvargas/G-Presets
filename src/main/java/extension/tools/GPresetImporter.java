@@ -18,6 +18,7 @@ import game.Inventory;
 import gearth.extensions.parsers.HFloorItem;
 import gearth.extensions.parsers.HInventoryItem;
 import gearth.extensions.parsers.HPoint;
+import gearth.extensions.parsers.HWallItem;
 import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
 import utils.StateExtractor;
@@ -180,7 +181,7 @@ public class GPresetImporter {
 
     private void maybeBlockPlacements(HMessage hMessage) {
         synchronized (lock) {
-            if (state != BuildingImportState.NONE) {
+            if (state != BuildingImportState.NONE && state != BuildingImportState.MOVE_FURNITURE) {
                 hMessage.setBlocked(true);
                 extension.sendVisualChatInfo("Can't drop furniture while the importer is active, please await the procedure or abort");
             }
@@ -220,9 +221,13 @@ public class GPresetImporter {
     }
 
     public boolean isReady() {
+        boolean hasFloorItems = presetConfig != null && !presetConfig.getFurniture().isEmpty();
+        boolean hasWallItems = presetConfig != null && presetConfig.getWallFurniture() != null && !presetConfig.getWallFurniture().isEmpty();
+        boolean bcReady = !hasWallItems || (extension.getCatalog() != null && extension.getCatalog().getState() == BCCatalog.CatalogState.COLLECTED);
         return extension.getFloorState().inRoom() && extension.furniDataReady() &&
-                extension.getInventory().getState() == Inventory.InventoryState.LOADED && extension.stackTile() != null &&
-                presetConfig != null &&
+                extension.getInventory().getState() == Inventory.InventoryState.LOADED &&
+                (!hasFloorItems || extension.stackTile() != null) &&
+                presetConfig != null && bcReady &&
                 extension.getPermissions().canMoveFurni() && (!extension.shouldExportWired() || extension.getPermissions().canModifyWired());
     }
 
@@ -253,6 +258,11 @@ public class GPresetImporter {
                         rootLocation = new HPoint(rootX, rootY);
                     }
                     catch (Exception ignore) {}
+
+                    if (rootLocation != null && state == BuildingImportState.AWAITING_ROOT_LOCATION
+                            && workingPresetConfig != null && workingPresetConfig.getFurniture().isEmpty()) {
+                        startWallOnlyImport();
+                    }
                 }
 
             }
@@ -292,7 +302,14 @@ public class GPresetImporter {
             wallInventoryCache.clear();
             rootLocation = null;
 
-            // check if user has enough furniture / BC items available (depending on settings)
+            boolean wallOnly = workingPresetConfig.getFurniture().isEmpty();
+
+            if (wallOnly) {
+                state = BuildingImportState.AWAITING_ROOT_LOCATION;
+                extension.sendVisualChatInfo("Select where the preset should be imported");
+                return;
+            }
+
             FurniDataTools furniData = extension.getFurniDataTools();
             FloorState floorState = extension.getFloorState();
             roomItemsList = new ArrayList<>(floorState.getItems());
@@ -408,13 +425,32 @@ public class GPresetImporter {
             }
 
             if (startAddingFurni) {
-                heightOffset = PresetUtils.lowestFloorPoint(extension.getFloorState(), workingPresetConfig, rootLocation);
+                if (workingPresetConfig.getFurniture().isEmpty()) {
+                    startWallOnlyImport();
+                } else {
+                    heightOffset = PresetUtils.lowestFloorPoint(extension.getFloorState(), workingPresetConfig, rootLocation);
 
-                state = BuildingImportState.ADD_UNSTACKABLES;
-                new Thread(this::addUnstackables).start();
-                extension.sendVisualChatInfo("Adding furniture...");
+                    state = BuildingImportState.ADD_UNSTACKABLES;
+                    new Thread(this::addUnstackables).start();
+                    extension.sendVisualChatInfo("Adding furniture...");
+                }
             }
         }
+    }
+
+    private void startWallOnlyImport() {
+        state = BuildingImportState.MOVE_FURNITURE;
+        new Thread(() -> {
+            placeWallItems();
+            synchronized (lock) {
+                if (state == BuildingImportState.MOVE_FURNITURE) {
+                    state = BuildingImportState.NONE;
+                    extension.sendVisualChatInfo("Imported the preset successfully");
+                    extension.getLogger().log("Finished importing the preset!", "green");
+                }
+            }
+        }).start();
+        extension.sendVisualChatInfo("Placing wall items...");
     }
 
     Map<Integer, LinkedList<HInventoryItem>> inventoryCache = new HashMap<>();
@@ -800,6 +836,9 @@ public class GPresetImporter {
         Inventory inventory = extension.getInventory();
         BCCatalog catalog = extension.getCatalog();
         ItemSource source = postConfig.getItemSource();
+        FloorState floor = extension.getFloorState();
+
+        List<int[]> wallItemStateQueue = new ArrayList<>();
 
         for (PresetWallFurni wallFurni : wallFurniture) {
             if (state != BuildingImportState.MOVE_FURNITURE) break;
@@ -812,7 +851,6 @@ public class GPresetImporter {
                 continue;
             }
 
-            // Calculate the absolute wall position
             WallPosition relPos = wallFurni.getLocation();
             int absX = relPos.getX() + rootLocation.getX();
             int absY = relPos.getY() + rootLocation.getY();
@@ -826,13 +864,13 @@ public class GPresetImporter {
 
             String locationString = absPos.toString();
 
-            // For inventory: build a cache key that includes state for variant matching
-            String invCacheKey = typeId + ":" + wallState;
+            boolean isPoster = "poster".equals(className);
+
+            String invCacheKey = isPoster ? typeId + ":" + wallState : String.valueOf(typeId);
             LinkedList<HInventoryItem> inventoryItems = wallInventoryCache.computeIfAbsent(
                     invCacheKey, k -> {
                         List<HInventoryItem> allOfType = inventory.getWallItemsByType(typeId);
-                        // Filter by state if the wall item has a specific state
-                        if (!wallState.isEmpty()) {
+                        if (isPoster && !wallState.isEmpty()) {
                             return allOfType.stream()
                                     .filter(item -> {
                                         try {
@@ -848,13 +886,11 @@ public class GPresetImporter {
                     }
             );
 
-            // For BC: look up the correct offerId from catalog (supports variants)
             BCCatalog.SingleFurniProduct bcProduct = null;
             if (catalog != null && catalog.getState() == BCCatalog.CatalogState.COLLECTED) {
                 bcProduct = catalog.getWallProduct(typeId, wallState);
             }
 
-            // Fallback to furnidata offerId if catalog not available
             int offerId = bcProduct != null ? bcProduct.getOfferId() : -1;
             int pageId = bcProduct != null ? bcProduct.getPageId() : -1;
             if (offerId == -1 && furniData.getWallItemDetails(className) != null) {
@@ -862,8 +898,22 @@ public class GPresetImporter {
                 pageId = -1;
             }
 
-            boolean useBC = source == ItemSource.ONLY_BC || (source == ItemSource.PREFER_BC && offerId != -1)
-                    || (source == ItemSource.PREFER_INVENTORY && inventoryItems.isEmpty());
+            boolean useBC;
+            if (source == ItemSource.ONLY_BC) {
+                useBC = true;
+            } else if (source == ItemSource.PREFER_BC) {
+                if (bcProduct != null) {
+                    useBC = true;
+                } else if (!inventoryItems.isEmpty()) {
+                    useBC = false;
+                } else {
+                    useBC = offerId != -1;
+                }
+            } else if (source == ItemSource.PREFER_INVENTORY) {
+                useBC = inventoryItems.isEmpty() && offerId != -1;
+            } else {
+                useBC = false;
+            }
 
             if (useBC) {
                 if (offerId == -1) {
@@ -875,6 +925,11 @@ public class GPresetImporter {
                     }
                     continue;
                 }
+                Set<Integer> wallIdsBefore = new HashSet<>();
+                if (!isPoster && !wallState.isEmpty()) {
+                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
+                }
+
                 extension.sendToServer(new HPacket(
                         "BuildersClubPlaceWallItem",
                         HMessage.Direction.TOSERVER,
@@ -885,6 +940,20 @@ public class GPresetImporter {
                         false
                 ));
                 Utils.sleep(230);
+
+                if (!isPoster && !wallState.isEmpty()) {
+                    for (HWallItem wi : floor.getWallItems()) {
+                        if (!wallIdsBefore.contains(wi.getId())) {
+                            if (!wallState.equals(wi.getState())) {
+                                try {
+                                    int targetStateInt = Integer.parseInt(wallState);
+                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
+                                } catch (NumberFormatException ignored) {}
+                            }
+                            break;
+                        }
+                    }
+                }
             } else {
                 if (inventoryItems.isEmpty()) {
                     if (!extension.allowIncompleteBuilds()) {
@@ -898,13 +967,57 @@ public class GPresetImporter {
 
                 HInventoryItem item = inventoryItems.pollFirst();
 
+                Set<Integer> wallIdsBefore = new HashSet<>();
+                if (!isPoster && !wallState.isEmpty()) {
+                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
+                }
+
+                String placeCmd = item.getId() + " " + locationString;
+
                 extension.sendToServer(new HPacket(
                         "PlaceObject",
                         HMessage.Direction.TOSERVER,
-                        "-" + item.getId() + " " + locationString
+                        placeCmd
                 ));
 
                 Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+
+                if (!isPoster && !wallState.isEmpty()) {
+                    for (HWallItem wi : floor.getWallItems()) {
+                        if (!wallIdsBefore.contains(wi.getId())) {
+                            if (!wallState.equals(wi.getState())) {
+                                try {
+                                    int targetStateInt = Integer.parseInt(wallState);
+                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
+                                } catch (NumberFormatException ignored) {}
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!wallItemStateQueue.isEmpty()) {
+            extension.sendVisualChatInfo("Setting wall item states..");
+            for (int[] entry : wallItemStateQueue) {
+                if (state != BuildingImportState.MOVE_FURNITURE) break;
+                int wallItemId = entry[0];
+                int targetState = entry[1];
+
+                HWallItem wallItem = floor.wallItemFromId(wallItemId);
+                if (wallItem == null) continue;
+
+                String currentState = wallItem.getState();
+                int attempts = 0;
+                while (state != BuildingImportState.NONE && !String.valueOf(targetState).equals(currentState) && attempts < 20) {
+                    extension.sendToServer(new HPacket("UseWallItem", HMessage.Direction.TOSERVER, wallItemId, 0));
+                    Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+
+                    wallItem = floor.wallItemFromId(wallItemId);
+                    currentState = wallItem != null ? wallItem.getState() : currentState;
+                    attempts++;
+                }
             }
         }
     }

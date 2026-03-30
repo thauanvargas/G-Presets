@@ -48,6 +48,8 @@ public class FurniDataTools {
     private Map<String, FloorItemDetails> nameToFloorItems = new HashMap<>();
     private Map<String, WallItemDetails> nameToWallItems = new HashMap<>();
 
+    private ExternalTexts externalTexts = null;
+
     public FurniDataTools(String host, Callback onLoadListener) {
         countryCode = host.substring(5, 7);
 
@@ -81,6 +83,12 @@ public class FurniDataTools {
             nameToWallItems.put(item.getString("classname"), new WallItemDetails(item));
         });
 
+        try {
+            externalTexts = new ExternalTexts(externalTextsUrl());
+        } catch (Exception e) {
+            System.err.println("Failed to load external_flash_texts: " + e.getMessage());
+        }
+
         isReady = true;
         onLoad.call();
     }
@@ -91,6 +99,14 @@ public class FurniDataTools {
         }
 
         return String.format("https://www.habbo%s/gamedata/furnidata_json/1", codeToDomainMap.get(countryCode));
+    }
+
+    private String externalTextsUrl() {
+        if (countryCode.equals("s2")) {
+            return "https://sandbox.habbo.com/gamedata/external_flash_texts/1";
+        }
+
+        return String.format("https://www.habbo%s/gamedata/external_flash_texts/1", codeToDomainMap.get(countryCode));
     }
 
     public boolean isReady() {
@@ -115,5 +131,9 @@ public class FurniDataTools {
 
     public boolean isStackable(String furniName) {
         return !UNSTACKABLE_FURNI.contains(furniName);
+    }
+
+    public ExternalTexts getExternalTexts() {
+        return externalTexts;
     }
 }

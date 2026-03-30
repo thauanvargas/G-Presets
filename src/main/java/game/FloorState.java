@@ -11,7 +11,6 @@ import gearth.extensions.parsers.stuffdata.IStuffData;
 import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
 import utils.Callback;
-import utils.WallPosition;
 
 import java.util.*;
 import java.util.function.Consumer;
@@ -35,8 +34,6 @@ public class FloorState {
 
     // Wall item tracking
     private volatile Map<Integer, HWallItem> wallIdToItem = null;
-    private volatile Map<Integer, Set<HWallItem>> wallTypeIdToItems = null;
-    private volatile List<List<Map<Integer, HWallItem>>> wallmap = null;
 
 
     private volatile Map<Integer, Set<Consumer<HFloorItem>>> stateUpdateListeners = new HashMap<>();
@@ -111,10 +108,10 @@ public class FloorState {
     }
 
     public boolean inRoom() {
-        return furnimap != null && wallmap != null && floorplan != null && heightmap != null && roomId != 0;
+        return furnimap != null && wallIdToItem != null && floorplan != null && heightmap != null && roomId != 0;
     }
     public void reset() {
-        if (heightmap != null || furnimap != null || floorplan != null || wallmap != null) {
+        if (heightmap != null || furnimap != null || floorplan != null || wallIdToItem != null) {
             synchronized (lock) {
                 heightmap = null;
                 furniIdToItem = null;
@@ -122,8 +119,6 @@ public class FloorState {
                 floorplan = null;
                 typeIdToItems = null;
                 wallIdToItem = null;
-                wallTypeIdToItems = null;
-                wallmap = null;
                 roomId = 0;
             }
             onRoomLeave.call();
@@ -467,17 +462,8 @@ public class FloorState {
         HWallItem[] wallItems = HWallItem.parse(hMessage.getPacket());
 
         synchronized (lock) {
-            if (wallmap == null) {
+            if (wallIdToItem == null) {
                 wallIdToItem = new HashMap<>();
-                wallmap = new ArrayList<>();
-                wallTypeIdToItems = new HashMap<>();
-
-                for (int i = 0; i < 130; i++) {
-                    wallmap.add(new ArrayList<>());
-                    for (int j = 0; j < 130; j++) {
-                        wallmap.get(i).add(new HashMap<>());
-                    }
-                }
             }
 
             Arrays.stream(wallItems).forEach(this::addWallItem);
@@ -488,7 +474,7 @@ public class FloorState {
     }
 
     private void onWallItemRemove(HMessage hMessage) {
-        if (wallmap != null) {
+        if (wallIdToItem != null) {
             HPacket packet = hMessage.getPacket();
             int itemId = Integer.parseInt(packet.readString());
             removeWallItem(itemId);
@@ -498,19 +484,12 @@ public class FloorState {
 
     private void removeWallItem(int itemId) {
         synchronized (lock) {
-            HWallItem item = wallIdToItem.remove(itemId);
-            if (item != null) {
-                WallPosition pos = new WallPosition(item.getLocation());
-                wallmap.get(pos.getX()).get(pos.getY()).remove(item.getId());
-                if (wallTypeIdToItems.containsKey(item.getTypeId())) {
-                    wallTypeIdToItems.get(item.getTypeId()).remove(item);
-                }
-            }
+            wallIdToItem.remove(itemId);
         }
     }
 
     private void onWallItemAdd(HMessage hMessage) {
-        if (wallmap != null) {
+        if (wallIdToItem != null) {
             synchronized (lock) {
                 HWallItem item = new HWallItem(hMessage.getPacket());
                 String ownerName = hMessage.getPacket().readString();
@@ -522,17 +501,11 @@ public class FloorState {
     }
 
     private void addWallItem(HWallItem item) {
-        WallPosition pos = new WallPosition(item.getLocation());
-        wallmap.get(pos.getX()).get(pos.getY()).put(item.getId(), item);
         wallIdToItem.put(item.getId(), item);
-        if (!wallTypeIdToItems.containsKey(item.getTypeId())) {
-            wallTypeIdToItems.put(item.getTypeId(), new HashSet<>());
-        }
-        wallTypeIdToItems.get(item.getTypeId()).add(item);
     }
 
     private void onWallItemUpdate(HMessage hMessage) {
-        if (wallmap != null) {
+        if (wallIdToItem != null) {
             HWallItem newItem = new HWallItem(hMessage.getPacket());
 
             HWallItem old = wallIdToItem.get(newItem.getId());
@@ -566,15 +539,6 @@ public class FloorState {
         synchronized (lock) {
             return wallIdToItem != null ? wallIdToItem.get(id) : null;
         }
-    }
-
-    public List<HWallItem> getWallFurniOnTile(int x, int y) {
-        synchronized (lock) {
-            if (wallmap != null && x >= 0 && y >= 0 && x < wallmap.size() && y < wallmap.get(x).size()) {
-                return new ArrayList<>(wallmap.get(x).get(y).values());
-            }
-        }
-        return new ArrayList<>();
     }
 
     public List<HWallItem> getWallItems() {
