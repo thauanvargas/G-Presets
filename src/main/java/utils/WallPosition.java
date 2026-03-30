@@ -6,7 +6,7 @@ import java.util.regex.Pattern;
 public class WallPosition {
 
     private static final Pattern WALL_PATTERN = Pattern.compile(
-            ":w=(\\d+),(\\d+)\\s+l=(\\d+),(\\d+)\\s+([rl])(?:\\s+a=(-?\\d+))?"
+            ":w=(\\d+),(\\d+)\\s+l=(-?\\d+),(-?\\d+)\\s+([rl])(?:\\s+a=(-?\\d+))?"
     );
 
     private int x;

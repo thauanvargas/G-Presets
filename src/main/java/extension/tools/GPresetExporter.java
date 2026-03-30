@@ -584,7 +584,10 @@ public class GPresetExporter {
                 synchronized (lock) {
                     if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
                         int remainingLeft = unRegisteredWiredsInArea(x, y, dimX, dimY).size();
-                        if (remainingLeft <= originalRemaining / 2) {
+                        if (remainingLeft == 0) {
+                            // all wired retrieved, just wait for variable map
+                        }
+                        else if (remainingLeft <= originalRemaining / 2) {
                             extension.sendVisualChatInfo(String.format("WARNING - Did not retrieve all wired. Retrying %d missing wired..", remainingLeft));
                             extension.getLogger().log(String.format("Did not retrieve all wired. Retrying %d missing wired..", remainingLeft), "orange");
                             retry = true;

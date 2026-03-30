@@ -1146,6 +1146,16 @@ public class GPresetImporter {
                 );
             }
 
+            String config = wiredBase.getStringConfig();
+            if (config == null || config.isEmpty()) {
+                int realId = realFurniIdMap.getOrDefault(wiredBase.getWiredId(), -1);
+                String className = realId != -1 && extension.getFloorState().furniFromId(realId) != null
+                        ? extension.getFurniDataTools().getFloorItemName(extension.getFloorState().furniFromId(realId).getTypeId())
+                        : "unknown";
+                extension.getLogger().log(String.format("Skipping wired '%s' (id=%d) - empty config", className, wiredBase.getWiredId()), "orange");
+                continue;
+            }
+
             saveWired(wiredBase, 0);
 
             for (FurniMoveInfo furniMoveInfo : undoBindMoves) {
