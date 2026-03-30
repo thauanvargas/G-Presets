@@ -435,6 +435,15 @@ public class FloorState {
         return new ArrayList<>();
     }
 
+    public List<HFloorItem> getItems() {
+        synchronized (lock) {
+            if (inRoom()) {
+                return new ArrayList<>(furniIdToItem.values());
+            }
+        }
+        return new ArrayList<>();
+    }
+
     public char floorHeight(int x, int y) {
         char result;
         synchronized (lock) {

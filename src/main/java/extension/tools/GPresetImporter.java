@@ -44,6 +44,8 @@ public class GPresetImporter {
         // preferably your character stands next to it (for manipulating states for furni like switches)
         // the location may not contain any furniture
         AWAITING_UNOCCUPIED_SPACE,
+        AWAITING_USE_ROOM_FURNI_RECT1,
+        AWAITING_USE_ROOM_FURNI_RECT2,
 
         AWAITING_ROOT_LOCATION,
 
@@ -78,11 +80,16 @@ public class GPresetImporter {
 
     private volatile int mainStackTile = -1;
     private volatile int mainStackDimensions = 0;
+
+    private HPoint useRoomFurniRectCorner1 = null;
+    private HPoint useRoomFurniRectCorner2 = null;
     private HPoint reservedSpace = null;
     private HPoint rootLocation = null;
     private HPoint stackTileLocation = null;
 
     private List<StackTileInfo> allAvailableStackTiles = null;
+
+    private List<HFloorItem> roomItemsList = new ArrayList<>();
 //    private HPoint originalStackTileLocation = new HPoint(0, 0); // move back after movements
 
     private int heightOffset = 0;
@@ -94,6 +101,7 @@ public class GPresetImporter {
         extension.intercept(HMessage.Direction.TOSERVER, "MoveAvatar", this::moveAvatar);
 
         extension.intercept(HMessage.Direction.TOCLIENT, "ObjectAdd", this::onObjectAdd);
+        extension.intercept(HMessage.Direction.TOCLIENT, "ObjectUpdate", this::onObjectAdd);
         extension.intercept(HMessage.Direction.TOCLIENT, "WiredAllVariablesDiffs", this::onWiredAllVariables);
 
         extension.intercept(HMessage.Direction.TOSERVER, "PlaceObject", this::maybeBlockPlacements);
@@ -216,8 +224,8 @@ public class GPresetImporter {
     }
 
     private void onChat(HMessage hMessage) {
+        String text = hMessage.getPacket().readString();
         synchronized (lock) {
-            String text = hMessage.getPacket().readString();
             if (text.startsWith(":ip") || text.startsWith(":importpreset")) {
                 hMessage.setBlocked(true);
 
@@ -255,6 +263,18 @@ public class GPresetImporter {
                 }
             }
 
+            if(text.equals("all") && (state.equals(BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT1) ||
+                    state.equals(BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT2))) {
+                hMessage.setBlocked(true);
+
+                useRoomFurniRectCorner1 = new HPoint(0, 0);
+                useRoomFurniRectCorner2 = new HPoint(100, 100);
+
+                if (state != BuildingImportState.AWAITING_UNOCCUPIED_SPACE) {
+                    state = BuildingImportState.AWAITING_UNOCCUPIED_SPACE;
+                    extension.sendVisualChatInfo("Select where the stack tile should be placed (empty area)");
+                }
+            }
         }
     }
 
@@ -270,16 +290,18 @@ public class GPresetImporter {
 
             // check if user has enough furniture / BC items available (depending on settings)
             FurniDataTools furniData = extension.getFurniDataTools();
+            FloorState floorState = extension.getFloorState();
+            roomItemsList = new ArrayList<>(floorState.getItems());
             List<FurniDropInfo> fakeDropInfo = new ArrayList<>();
             for (PresetFurni f : workingPresetConfig.getFurniture()) {
                 fakeDropInfo.add(new FurniDropInfo(-1, -1, furniData.getFloorTypeId(f.getClassName()), postConfig.getItemSource(), -1));
             }
-            Map<String, Integer> missing = AvailabilityChecker.missingItems(fakeDropInfo, extension.getInventory(), furniData);
+            Map<String, Integer> missing = AvailabilityChecker.missingItems(fakeDropInfo, extension.getInventory(), furniData, floorState, extension.useRoomFurni());
             if (missing == null) {
                 extension.sendVisualChatInfo("ERROR: Inventory, catalog or furnidata is unavailable");
             }
             else {
-                if (missing.size() != 0) {
+                if (!missing.isEmpty()) {
                     if (extension.allowIncompleteBuilds()) {
                         extension.sendVisualChatInfo("Some items were not available, building anyways..");
                     }
@@ -305,15 +327,20 @@ public class GPresetImporter {
                     }
                 });
 
-                if (allAvailableStackTiles.size() > 0) {
+                if (!allAvailableStackTiles.isEmpty()) {
                     extension.getLogger().log(String.format("Detected %d available types of stacktiles", allAvailableStackTiles.size()), "green");
                 }
 
 //                originalStackTileLocation = extension.stackTile().getTile();
                 mainStackDimensions = extension.getStackTileSetting().getDimension();
 
-                state = BuildingImportState.AWAITING_UNOCCUPIED_SPACE;
-                extension.sendVisualChatInfo("Select unoccupied space in the room");
+                if(extension.useRoomFurni()) {
+                    state = BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT1;
+                    extension.sendVisualChatInfo("You've enabled use Room Furni, please select the start rectangle around the furni you want to use as backup or type 'all'");
+                } else {
+                    state = BuildingImportState.AWAITING_UNOCCUPIED_SPACE;
+                    extension.sendVisualChatInfo("Select where the stack tile should be placed (empty area)");
+                }
             }
 
         }
@@ -326,12 +353,34 @@ public class GPresetImporter {
         synchronized (lock) {
             boolean startAddingFurni = false;
 
-            if (state == BuildingImportState.AWAITING_UNOCCUPIED_SPACE) {
+            if (state == BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT1) {
                 hMessage.setBlocked(true);
-                reservedSpace = new HPoint(
+                useRoomFurniRectCorner1 = new HPoint(
                         hMessage.getPacket().readInteger(),
                         hMessage.getPacket().readInteger()
                 );
+
+                if (useRoomFurniRectCorner2 == null) {
+                    state = BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT2;
+                    extension.sendVisualChatInfo("Select the end of the rectangle where the furni is");
+                }
+            } else if (state == BuildingImportState.AWAITING_USE_ROOM_FURNI_RECT2) {
+                hMessage.setBlocked(true);
+                useRoomFurniRectCorner2 = new HPoint(
+                        hMessage.getPacket().readInteger(),
+                        hMessage.getPacket().readInteger()
+                );
+
+                if (reservedSpace == null) {
+                    state = BuildingImportState.AWAITING_UNOCCUPIED_SPACE;
+                    extension.sendVisualChatInfo("Select where the stack tile should be placed (empty area)");
+                }
+            } else if (state == BuildingImportState.AWAITING_UNOCCUPIED_SPACE) {
+                hMessage.setBlocked(true);
+                int sx = hMessage.getPacket().readInteger();
+                int sy = hMessage.getPacket().readInteger();
+                reservedSpace = new HPoint(sx, sy);
+                stackTileLocation = new HPoint(sx, sy);
 
                 if (rootLocation == null) {
                     state = BuildingImportState.AWAITING_ROOT_LOCATION;
@@ -383,7 +432,9 @@ public class GPresetImporter {
         LinkedList<HInventoryItem> inventoryItems = inventoryCache.get(typeId);
 
         boolean useBC = source == ItemSource.ONLY_BC || (source == ItemSource.PREFER_BC && offerId != -1)
-                || ( source == ItemSource.PREFER_INVENTORY && inventoryItems.size() == 0 );
+                || ( source == ItemSource.PREFER_INVENTORY && inventoryItems.isEmpty());
+
+        boolean useRoomFurni = extension.useRoomFurni();
 
         if (useBC) {
             if (offerId == -1) {
@@ -410,7 +461,7 @@ public class GPresetImporter {
             Utils.sleep(230);
         }
         else {
-            if (inventoryItems.size() == 0) {
+            if (inventoryItems.isEmpty() && !useRoomFurni) {
                 if (!extension.allowIncompleteBuilds()) {
                     state = BuildingImportState.NONE;
                     extension.sendVisualChatInfo(String.format("ERROR: Couldn't find '%s' in inventory.. aborting", className));
@@ -420,6 +471,35 @@ public class GPresetImporter {
                 }
                 return;
             }
+
+            if(useRoomFurni && inventoryItems.isEmpty()) {
+                HFloorItem floorItem = roomItemsList
+                        .stream()
+                        .filter(furni -> furni.getTypeId() == dropInfo.getTypeId() && isInsideUseRoomRectangle(furni.getTile().getX(), furni.getTile().getY()))
+                        .findFirst()
+                        .orElse(null);
+
+                if (floorItem != null) {
+                    roomItemsList.removeIf(item -> item.getId() == floorItem.getId());
+
+                    realFurniIdMap.put(dropInfo.getTypeId(), floorItem.getId());
+
+                    HPacket packet = new HPacket("MoveObject", HMessage.Direction.TOSERVER, floorItem.getId(), dropInfo.getX(), dropInfo.getY(), dropInfo.getRotation());
+                    extension.sendToServer(packet);
+
+                    Utils.sleep(600);
+                }
+                else if (!extension.allowIncompleteBuilds()) {
+                    state = BuildingImportState.NONE;
+                    extension.sendVisualChatInfo(String.format("ERROR: Couldn't find '%s' in inventory or room.. aborting", className));
+                }
+                else {
+                    extension.sendVisualChatInfo(String.format("Couldn't find '%s' in inventory or room.. continuing", className));
+                }
+
+                return;
+            }
+
             HInventoryItem item = inventoryItems.pollFirst();
             extension.sendToServer(new HPacket(
                     "PlaceObject",
@@ -435,6 +515,22 @@ public class GPresetImporter {
 //            Utils.sleep(600);
             Utils.sleep(150);
         }
+    }
+
+    private boolean isInsideUseRoomRectangle(int px, int py) {
+        if (useRoomFurniRectCorner1 == null || useRoomFurniRectCorner2 == null) return false;
+
+        int x1 = useRoomFurniRectCorner1.getX();
+        int y1 = useRoomFurniRectCorner1.getY();
+        int x2 = useRoomFurniRectCorner2.getX();
+        int y2 = useRoomFurniRectCorner2.getY();
+
+        int minX = Math.min(x1, x2);
+        int maxX = Math.max(x1, x2);
+        int minY = Math.min(y1, y2);
+        int maxY = Math.max(y1, y2);
+
+        return px >= minX && px <= maxX && py >= minY && py <= maxY;
     }
 
     private void moveFurni(int furniId, int x, int y, int rot, boolean moveStackTile, double height) {
@@ -488,7 +584,7 @@ public class GPresetImporter {
 
             synchronized (lock) {
                 if (state != BuildingImportState.NONE) {
-                    moveFurni(furniId, reservedSpace.getX(), reservedSpace.getY(), 0, false, -1);
+                    moveFurni(furniId, stackTileLocation.getX(), stackTileLocation.getY(), 0, false, -1);
                 }
             }
 
@@ -643,7 +739,7 @@ public class GPresetImporter {
         if (state == BuildingImportState.MOVE_FURNITURE) {
             List<HFloorItem> maybeNotMovedItems = extension.getFloorState().getFurniOnTile(stackTileLocation.getX(), stackTileLocation.getY());
             maybeNotMovedItems.addAll(extension.getFloorState().getFurniOnTile(stackTileLocation.getX(), stackTileLocation.getY()));
-            maybeNotMovedItems.addAll(extension.getFloorState().getFurniOnTile(reservedSpace.getX(), reservedSpace.getY()));
+            maybeNotMovedItems.addAll(extension.getFloorState().getFurniOnTile(stackTileLocation.getX(), stackTileLocation.getY()));
             maybeNotMovedItems = maybeNotMovedItems.stream().filter(h -> {
                 PresetFurni p = movesByRealId.get(h.getId());
                 if (p == null) return false;
@@ -958,29 +1054,41 @@ public class GPresetImporter {
         // this will be the place where all furniture is placed on
         FloorState floor = extension.getFloorState();
 
+        // Search near the selected root location / reserved space instead of from (0,0)
+        int centerX = rootLocation != null ? rootLocation.getX() : 0;
+        int centerY = rootLocation != null ? rootLocation.getY() : 0;
 
-        for (int x = 0; x < 64 - mainStackDimensions; x++) {
+        // Expanding search by distance from center
+        int maxDist = 64;
+        for (int dist = 0; dist < maxDist; dist++) {
+            for (int dx = -dist; dx <= dist; dx++) {
+                for (int dy = -dist; dy <= dist; dy++) {
+                    if (Math.abs(dx) != dist && Math.abs(dy) != dist) continue; // only check the perimeter of this distance ring
 
-            nextIteration:
-            for (int y = 0; y < 64 - mainStackDimensions; y++) {
+                    int x = centerX + dx;
+                    int y = centerY + dy;
 
-                char reference = floor.floorHeight(x, y);
-                if (reference == 'x') continue;
+                    if (x < 0 || y < 0 || x >= 64 - mainStackDimensions || y >= 64 - mainStackDimensions) continue;
 
-                for (int xOffset = 0; xOffset < mainStackDimensions; xOffset++) {
-                    for (int yOffset = 0; yOffset < mainStackDimensions; yOffset++) {
-                        if (floor.floorHeight(x + xOffset, y + yOffset) != reference) {
-                            continue nextIteration;
+                    char reference = floor.floorHeight(x, y);
+                    if (reference == 'x') continue;
+
+                    boolean valid = true;
+                    for (int xOffset = 0; xOffset < mainStackDimensions && valid; xOffset++) {
+                        for (int yOffset = 0; yOffset < mainStackDimensions && valid; yOffset++) {
+                            if (floor.floorHeight(x + xOffset, y + yOffset) != reference) {
+                                valid = false;
+                            }
                         }
                     }
-                }
 
-                if (!locationContainsWired(x, y) && !locationContainsWired(x + 1, y)) {
-                    return new HPoint(x, y);
+                    if (valid && !locationContainsWired(x, y) && !locationContainsWired(x + 1, y)) {
+                        return new HPoint(x, y);
+                    }
                 }
             }
         }
-        return new HPoint(0, 0);
+        return new HPoint(centerX, centerY);
     }
 
     private void addUnstackables() {
@@ -1025,13 +1133,14 @@ public class GPresetImporter {
 //        }
 
         if (state == BuildingImportState.ADD_FURNITURE) {
-            stackTileLocation = findStackTileLocation();
             dropAllOtherFurni();
         }
 
     }
 
     public void reset() {
+        useRoomFurniRectCorner1 = null;
+        useRoomFurniRectCorner2 = null;
         state = BuildingImportState.NONE;
     }
 
