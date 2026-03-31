@@ -421,17 +421,24 @@ public class GPresetExporter {
                 // skip wall items
             } else {
                 List<HWallItem> wallItems = floor.getWallItems();
+                System.out.println(String.format("[Export] Collecting wall items: %d total in room", wallItems.size()));
                 for (HWallItem f : wallItems) {
                     String classname = furniDataTools.getWallItemName(f.getTypeId());
+                    String rawLocation = f.getLocation();
+                    System.out.println(String.format(
+                            "[Export WallRaw] id=%d '%s' | rawLocation='%s' | state='%s'",
+                            f.getId(), classname, rawLocation, f.getState()
+                    ));
 
                     PresetWallFurni presetWallFurni = new PresetWallFurni(
                             f.getId(),
                             classname,
-                            new WallPosition(f.getLocation()),
+                            new WallPosition(rawLocation),
                             f.getState()
                     );
                     allWallFurni.add(presetWallFurni);
                 }
+                System.out.println(String.format("[Export] Wall items collected: %d", allWallFurni.size()));
             }
 
 
@@ -478,14 +485,22 @@ public class GPresetExporter {
             allWallFurni.forEach(presetWallFurni -> {
                 presetWallFurni.setFurniId(mappedFurniIds.get(presetWallFurni.getFurniId()));
                 WallPosition oldLocation = presetWallFurni.getLocation();
-                presetWallFurni.setLocation(new WallPosition(
+                WallPosition newLocation = new WallPosition(
                         oldLocation.getX() - x,
                         oldLocation.getY() - y,
                         oldLocation.getOffsetX(),
                         oldLocation.getOffsetY(),
                         oldLocation.getDirection(),
                         oldLocation.getAltitude() - 100 * lowestFloorPoint
+                );
+                System.out.println(String.format(
+                        "[Export WallItem] '%s' | original=(:w=%d,%d l=%d,%d %c a=%d) | root=(%d,%d) lowestFloor=%d | stored=(:w=%d,%d l=%d,%d %c a=%d)",
+                        presetWallFurni.getClassName(),
+                        oldLocation.getX(), oldLocation.getY(), oldLocation.getOffsetX(), oldLocation.getOffsetY(), oldLocation.getDirection(), oldLocation.getAltitude(),
+                        x, y, lowestFloorPoint,
+                        newLocation.getX(), newLocation.getY(), newLocation.getOffsetX(), newLocation.getOffsetY(), newLocation.getDirection(), newLocation.getAltitude()
                 ));
+                presetWallFurni.setLocation(newLocation);
             });
             wiredLists.forEach(l -> l.forEach((Consumer<PresetWiredBase>) w -> {
                 w.setWiredId(mappedFurniIds.get(w.getWiredId()));
@@ -548,6 +563,18 @@ public class GPresetExporter {
 
             PresetWireds presetWireds = new PresetWireds(allConditions, allEffects, allTriggers, allAddons, allSelectors, allVariables, variablesMap);
             PresetConfig presetConfig = new PresetConfig(allFurni, allWallFurni, presetWireds, allBindings, allAdsBackgrounds);
+
+            System.out.println(String.format(
+                    "[Export Summary] name='%s' | floorFurni=%d | wallFurni=%d | wallOnly=%b | root=(%d,%d) dim=(%d,%d)",
+                    name, allFurni.size(), allWallFurni.size(), wallOnlyExport, x, y, dimX, dimY
+            ));
+            for (PresetWallFurni wf : allWallFurni) {
+                WallPosition loc = wf.getLocation();
+                System.out.println(String.format(
+                        "[Export Final] '%s' (id=%d) | stored=(%s) | altitude=%d",
+                        wf.getClassName(), wf.getFurniId(), loc.toFullString(), loc.getAltitude()
+                ));
+            }
 
             PresetConfigUtils.savePreset(name, presetConfig);
             extension.updateInstalledPresets();

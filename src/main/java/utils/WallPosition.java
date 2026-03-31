@@ -77,4 +77,46 @@ public class WallPosition {
     public int getAltitude() {
         return altitude;
     }
+
+    /**
+     * Adjusts the position so offsetX is within [0,16] by shifting x/y,
+     * since the server rejects placement commands with offsetX > 16.
+     * After placement, MoveWallItem corrects to the exact target position.
+     */
+    public WallPosition toPlacementSafe() {
+        int safeX = x;
+        int safeY = y;
+        int safeOffsetX = offsetX;
+
+        while (safeOffsetX > 16) {
+            safeOffsetX -= 32;
+            if (direction == 'r') {
+                safeY++;
+            } else {
+                safeX++;
+            }
+        }
+        while (safeOffsetX < 0) {
+            safeOffsetX += 32;
+            if (direction == 'r') {
+                safeY--;
+            } else {
+                safeX--;
+            }
+        }
+        return new WallPosition(safeX, safeY, safeOffsetX, offsetY, direction, 0);
+    }
+
+    /**
+     * Strips the altitude part (" a=...") from a wall location string.
+     * Useful for comparing positions ignoring server-calculated altitude.
+     */
+    public static String stripAltitude(String location) {
+        if (location == null) return null;
+        int aIdx = location.indexOf(" a=");
+        if (aIdx >= 0) {
+            return location.substring(0, aIdx);
+        }
+        return location;
+    }
 }

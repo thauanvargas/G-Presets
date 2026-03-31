@@ -864,6 +864,16 @@ public class GPresetImporter {
 
             String locationString = absPos.toString();
 
+            // Normalize offsetX into [0,16] by shifting wall tile coords,
+            // since the server rejects placement commands with offsetX > 16.
+            WallPosition placePos = absPos.toPlacementSafe();
+            String placeLocationString = placePos.toString();
+
+            System.out.println(String.format(
+                    "[WallItem] '%s' | target='%s' | placementPos='%s'",
+                    className, locationString, placeLocationString
+            ));
+
             boolean isPoster = "poster".equals(className);
 
             String invCacheKey = isPoster ? typeId + ":" + wallState : String.valueOf(typeId);
@@ -926,9 +936,7 @@ public class GPresetImporter {
                     continue;
                 }
                 Set<Integer> wallIdsBefore = new HashSet<>();
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
-                }
+                for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
 
                 extension.sendToServer(new HPacket(
                         "BuildersClubPlaceWallItem",
@@ -936,23 +944,49 @@ public class GPresetImporter {
                         pageId,
                         offerId,
                         wallState,
-                        locationString,
+                        placeLocationString,
                         false
                 ));
                 Utils.sleep(230);
 
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) {
-                        if (!wallIdsBefore.contains(wi.getId())) {
-                            if (!wallState.equals(wi.getState())) {
-                                try {
-                                    int targetStateInt = Integer.parseInt(wallState);
-                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
-                                } catch (NumberFormatException ignored) {}
-                            }
-                            break;
-                        }
+                HWallItem newItem = null;
+                for (HWallItem wi : floor.getWallItems()) {
+                    if (!wallIdsBefore.contains(wi.getId())) {
+                        newItem = wi;
+                        break;
                     }
+                }
+
+                if (newItem != null) {
+                    String placedAt = WallPosition.stripAltitude(newItem.getLocation());
+                    System.out.println(String.format("[BC Place] '%s' id=%d | placedAt='%s' | target='%s'",
+                            className, newItem.getId(), placedAt, locationString));
+                    if (!placedAt.equals(locationString)) {
+                        // Move to exact target position
+                        extension.sendToServer(new HPacket(
+                                "MoveWallItem", HMessage.Direction.TOSERVER,
+                                newItem.getId(), locationString
+                        ));
+                        Utils.sleep(150);
+                        // Verify move
+                        HWallItem afterMove = floor.wallItemFromId(newItem.getId());
+                        if (afterMove != null) {
+                            String movedTo = WallPosition.stripAltitude(afterMove.getLocation());
+                            System.out.println(String.format("[BC Move] '%s' id=%d | movedTo='%s' | match=%b",
+                                    className, newItem.getId(), movedTo, movedTo.equals(locationString)));
+                        }
+                    } else {
+                        System.out.println(String.format("[BC Place] '%s' id=%d | already at exact position", className, newItem.getId()));
+                    }
+
+                    if (!isPoster && !wallState.isEmpty() && !wallState.equals(newItem.getState())) {
+                        try {
+                            int targetStateInt = Integer.parseInt(wallState);
+                            wallItemStateQueue.add(new int[]{newItem.getId(), targetStateInt});
+                        } catch (NumberFormatException ignored) {}
+                    }
+                } else {
+                    System.out.println(String.format("[BC Place] '%s' - WARNING: newItem not found after placement!", className));
                 }
             } else {
                 if (inventoryItems.isEmpty()) {
@@ -968,11 +1002,9 @@ public class GPresetImporter {
                 HInventoryItem item = inventoryItems.pollFirst();
 
                 Set<Integer> wallIdsBefore = new HashSet<>();
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
-                }
+                for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
 
-                String placeCmd = item.getId() + " " + locationString;
+                String placeCmd = item.getId() + " " + placeLocationString;
 
                 extension.sendToServer(new HPacket(
                         "PlaceObject",
@@ -982,18 +1014,44 @@ public class GPresetImporter {
 
                 Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
 
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) {
-                        if (!wallIdsBefore.contains(wi.getId())) {
-                            if (!wallState.equals(wi.getState())) {
-                                try {
-                                    int targetStateInt = Integer.parseInt(wallState);
-                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
-                                } catch (NumberFormatException ignored) {}
-                            }
-                            break;
-                        }
+                HWallItem newItem = null;
+                for (HWallItem wi : floor.getWallItems()) {
+                    if (!wallIdsBefore.contains(wi.getId())) {
+                        newItem = wi;
+                        break;
                     }
+                }
+
+                if (newItem != null) {
+                    String placedAt = WallPosition.stripAltitude(newItem.getLocation());
+                    System.out.println(String.format("[Inv Place] '%s' id=%d | placedAt='%s' | target='%s'",
+                            className, newItem.getId(), placedAt, locationString));
+                    if (!placedAt.equals(locationString)) {
+                        // Move to exact target position
+                        extension.sendToServer(new HPacket(
+                                "MoveWallItem", HMessage.Direction.TOSERVER,
+                                newItem.getId(), locationString
+                        ));
+                        Utils.sleep(150);
+                        // Verify move
+                        HWallItem afterMove = floor.wallItemFromId(newItem.getId());
+                        if (afterMove != null) {
+                            String movedTo = WallPosition.stripAltitude(afterMove.getLocation());
+                            System.out.println(String.format("[Inv Move] '%s' id=%d | movedTo='%s' | match=%b",
+                                    className, newItem.getId(), movedTo, movedTo.equals(locationString)));
+                        }
+                    } else {
+                        System.out.println(String.format("[Inv Place] '%s' id=%d | already at exact position", className, newItem.getId()));
+                    }
+
+                    if (!isPoster && !wallState.isEmpty() && !wallState.equals(newItem.getState())) {
+                        try {
+                            int targetStateInt = Integer.parseInt(wallState);
+                            wallItemStateQueue.add(new int[]{newItem.getId(), targetStateInt});
+                        } catch (NumberFormatException ignored) {}
+                    }
+                } else {
+                    System.out.println(String.format("[Inv Place] '%s' - WARNING: newItem not found after placement!", className));
                 }
             }
         }
