@@ -52,6 +52,7 @@ public class GPresetImporter {
         AWAITING_USE_ROOM_FURNI_RECT2,
 
         AWAITING_ROOT_LOCATION,
+        AWAITING_UNOCCUPIED_SPACE_STATE_CHANGER,
 
         ADD_UNSTACKABLES,   // add directly to correct location
 
@@ -90,6 +91,7 @@ public class GPresetImporter {
     private HPoint reservedSpace = null;
     private HPoint rootLocation = null;
     private HPoint stackTileLocation = null;
+    private HPoint stateChangerLocation = null;
 
     private List<StackTileInfo> allAvailableStackTiles = null;
 
@@ -301,6 +303,7 @@ public class GPresetImporter {
             inventoryCache.clear();
             wallInventoryCache.clear();
             rootLocation = null;
+            stateChangerLocation = null;
 
             boolean wallOnly = workingPresetConfig.getFurniture().isEmpty();
 
@@ -421,6 +424,18 @@ public class GPresetImporter {
 //                        PresetUtils.lowestFloorPoint(extension.getFloorState(), workingPresetConfig, new HPoint(x, y))
                 );
 
+                if (!extension.getPermissions().canModifyWired() && presetNeedsStateChanges()) {
+                    state = BuildingImportState.AWAITING_UNOCCUPIED_SPACE_STATE_CHANGER;
+                    extension.sendVisualChatInfo("No wired permissions - select a tile for state changing furni (empty area near you)");
+                } else {
+                    startAddingFurni = true;
+                }
+            }
+            else if (state == BuildingImportState.AWAITING_UNOCCUPIED_SPACE_STATE_CHANGER) {
+                hMessage.setBlocked(true);
+                int scx = hMessage.getPacket().readInteger();
+                int scy = hMessage.getPacket().readInteger();
+                stateChangerLocation = new HPoint(scx, scy);
                 startAddingFurni = true;
             }
 
@@ -455,6 +470,10 @@ public class GPresetImporter {
 
     Map<Integer, LinkedList<HInventoryItem>> inventoryCache = new HashMap<>();
     Map<String, LinkedList<HInventoryItem>> wallInventoryCache = new HashMap<>();
+
+    private boolean isStackTileClass(String className) {
+        return className != null && className.startsWith("tile_stackmagic");
+    }
 
     private void dropFurni(FurniDropInfo dropInfo) {
         FurniDataTools furniData = extension.getFurniDataTools();
@@ -603,6 +622,14 @@ public class GPresetImporter {
         Utils.sleep(60);
     }
 
+    private boolean presetNeedsStateChanges() {
+        if (workingPresetConfig == null) return false;
+        for (PresetFurni f : workingPresetConfig.getFurniture()) {
+            if (f.getState() != null) return true;
+        }
+        return false;
+    }
+
     private void attemptSetState(int furniId, String targetState) {
         FloorState floor = extension.getFloorState();
         FurniDataTools furniData = extension.getFurniDataTools();
@@ -623,9 +650,12 @@ public class GPresetImporter {
                 return;
             }
 
+            HPoint stateLocation = stateChangerLocation != null ? stateChangerLocation : stackTileLocation;
+            if (stateLocation == null) return;
+
             synchronized (lock) {
                 if (state != BuildingImportState.NONE) {
-                    moveFurni(furniId, stackTileLocation.getX(), stackTileLocation.getY(), 0, false, -1);
+                    moveFurni(furniId, stateLocation.getX(), stateLocation.getY(), 0, false, -1);
                 }
             }
 
@@ -740,7 +770,7 @@ public class GPresetImporter {
 
         synchronized (lock) {
             workingPresetConfig.getFurniture().forEach(p -> {
-                if (furniData.isStackable(p.getClassName()) && !p.getClassName().startsWith("wf_trg_") && realFurniIdMap.containsKey(p.getFurniId())) {
+                if (furniData.isStackable(p.getClassName()) && !p.getClassName().startsWith("wf_trg_") && !isStackTileClass(p.getClassName()) && realFurniIdMap.containsKey(p.getFurniId())) {
                     moveList.add(p);
                 }
             });
@@ -816,6 +846,11 @@ public class GPresetImporter {
         // Place wall items
         if (state == BuildingImportState.MOVE_FURNITURE) {
             placeWallItems();
+        }
+
+        // Place preset stack tiles last
+        if (state == BuildingImportState.MOVE_FURNITURE) {
+            placePresetStackTiles();
         }
 
         synchronized (lock) {
@@ -1022,6 +1057,79 @@ public class GPresetImporter {
         }
     }
 
+    private void placePresetStackTiles() {
+        FurniDataTools furniData = extension.getFurniDataTools();
+        FloorState floor = extension.getFloorState();
+        List<PresetFurni> presetStackTiles = new ArrayList<>();
+
+        synchronized (lock) {
+            for (PresetFurni f : workingPresetConfig.getFurniture()) {
+                if (isStackTileClass(f.getClassName()) && furniData.isStackable(f.getClassName())) {
+                    presetStackTiles.add(f);
+                }
+            }
+        }
+
+        if (presetStackTiles.isEmpty()) return;
+
+        extension.sendVisualChatInfo(String.format("Placing %d stack tile(s)...", presetStackTiles.size()));
+
+        for (PresetFurni stackTileFurni : presetStackTiles) {
+            if (state != BuildingImportState.MOVE_FURNITURE) break;
+
+            int targetX = stackTileFurni.getLocation().getX() + rootLocation.getX();
+            int targetY = stackTileFurni.getLocation().getY() + rootLocation.getY();
+            int targetRot = stackTileFurni.getRotation();
+
+            // Track items before drop to identify the new one
+            Set<Integer> idsBefore = new HashSet<>();
+            for (HFloorItem fi : floor.getItems()) idsBefore.add(fi.getId());
+
+            // Drop at the helper stack tile location
+            FurniDropInfo dropInfo = new FurniDropInfo(
+                    stackTileLocation.getX(),
+                    stackTileLocation.getY(),
+                    furniData.getFloorTypeId(stackTileFurni.getClassName()),
+                    postConfig.getItemSource(),
+                    0
+            );
+            dropFurni(dropInfo);
+            Utils.sleep(300);
+
+            // Find the newly placed item
+            HFloorItem newItem = null;
+            for (HFloorItem fi : floor.getItems()) {
+                if (!idsBefore.contains(fi.getId())) {
+                    newItem = fi;
+                    break;
+                }
+            }
+
+            if (newItem != null) {
+                int realId = newItem.getId();
+                realFurniIdMap.put(stackTileFurni.getFurniId(), realId);
+
+                // Move to correct position
+                moveFurni(realId, targetX, targetY, targetRot, false, -1);
+
+                // Set custom stacking height from the Z coordinate
+                double z = stackTileFurni.getLocation().getZ();
+                int heightCenti = ((int) (z * 100)) + heightOffset * 100;
+                extension.sendToServer(new HPacket(
+                        "SetCustomStackingHeight",
+                        HMessage.Direction.TOSERVER,
+                        realId, heightCenti
+                ));
+                Utils.sleep(60);
+
+                // Set state if available
+                if (stackTileFurni.getState() != null) {
+                    attemptSetState(realId, stackTileFurni.getState());
+                }
+            }
+        }
+    }
+
     private void setupWired() {
         List<PresetWiredBase> allWireds = new ArrayList<>();
         Map<Integer, List<PresetWiredFurniBinding>> wiredBindings = new HashMap<>();
@@ -1178,7 +1286,7 @@ public class GPresetImporter {
 
         synchronized (lock) {
             workingPresetConfig.getFurniture().forEach(f -> {
-                if (furniData.isStackable(f.getClassName())) {
+                if (furniData.isStackable(f.getClassName()) && !isStackTileClass(f.getClassName())) {
                     FurniDropInfo dropInfo = new FurniDropInfo(
                             f.getClassName().startsWith("wf_trg_") ?
                                     stackTileLocation.getX() + 1 :
@@ -1382,6 +1490,7 @@ public class GPresetImporter {
     public void reset() {
         useRoomFurniRectCorner1 = null;
         useRoomFurniRectCorner2 = null;
+        stateChangerLocation = null;
         state = BuildingImportState.NONE;
     }
 
