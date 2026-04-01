@@ -20,6 +20,7 @@ import gearth.extensions.ExtensionForm;
 import gearth.extensions.ExtensionInfo;
 import gearth.extensions.parsers.HFloorItem;
 import gearth.extensions.parsers.HPoint;
+import gearth.extensions.parsers.HWallItem;
 import gearth.misc.Cacher;
 import gearth.protocol.HMessage;
 import gearth.protocol.HPacket;
@@ -131,6 +132,7 @@ public class GPresets extends ExtensionForm {
         logger.log("* :exportpreset [all] / :ep [all]", "purple");
         logger.log("* :exportpresetwalls / :epw", "purple");
         logger.log("* :importpreset [x,y] / :ip [x,y]", "purple");
+        logger.log("* :pickupnonbc / :pnbc", "purple");
         logger.log("* :abort / :a", "purple");
 
         stacktile_tgl.selectedToggleProperty().addListener(observable -> {
@@ -251,6 +253,8 @@ public class GPresets extends ExtensionForm {
                 ping = newPing;
             }
         });
+
+        intercept(HMessage.Direction.TOSERVER, "Chat", this::onPickupNonBCChat);
 
         this.floorState.requestRoom(this);
         updateUI();
@@ -415,6 +419,61 @@ public class GPresets extends ExtensionForm {
             presetListView.getItems().clear();
             presetListView.getItems().addAll(installed);
         });
+    }
+
+    private void onPickupNonBCChat(HMessage hMessage) {
+        String text = hMessage.getPacket().readString();
+        if (text.equals(":pickupnonbc") || text.equals(":pnbc")) {
+            hMessage.setBlocked(true);
+            new Thread(() -> pickupNonBCFurni()).start();
+        }
+    }
+
+    private void pickupNonBCFurni() {
+        if (!floorState.inRoom()) {
+            sendVisualChatInfo("ERROR: Not in a room");
+            return;
+        }
+        if (catalog.getState() != BCCatalog.CatalogState.COLLECTED) {
+            sendVisualChatInfo("ERROR: BC catalog not loaded. Load it first.");
+            return;
+        }
+        if (!furniDataReady()) {
+            sendVisualChatInfo("ERROR: Furnidata not ready");
+            return;
+        }
+
+        int pickedFloor = 0;
+        int pickedWall = 0;
+        int skippedFloor = 0;
+        int skippedWall = 0;
+
+        // Pick up non-BC floor items
+        List<HFloorItem> floorItems = floorState.getItems();
+        for (HFloorItem item : floorItems) {
+            if (catalog.getFloorProduct(item.getTypeId()) != null) {
+                skippedFloor++;
+                continue;
+            }
+            sendToServer(new HPacket("PickupObject", HMessage.Direction.TOSERVER, 2, item.getId()));
+            pickedFloor++;
+            Utils.sleep(80);
+        }
+
+        // Pick up non-BC wall items
+        List<HWallItem> wallItems = floorState.getWallItems();
+        for (HWallItem item : wallItems) {
+            if (catalog.getAnyWallProduct(item.getTypeId()) != null) {
+                skippedWall++;
+                continue;
+            }
+            sendToServer(new HPacket("PickupObject", HMessage.Direction.TOSERVER, 1, item.getId()));
+            pickedWall++;
+            Utils.sleep(80);
+        }
+
+        sendVisualChatInfo(String.format("Picked up %d floor + %d wall items (skipped %d BC floor + %d BC wall)",
+                pickedFloor, pickedWall, skippedFloor, skippedWall));
     }
 
     public void sendVisualChatInfo(String text) {
