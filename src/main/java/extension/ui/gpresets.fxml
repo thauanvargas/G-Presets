@@ -82,7 +82,7 @@
                   <CheckBox fx:id="noExportWallItemsCbx" layoutX="14.0" layoutY="187.0" mnemonicParsing="false" text="Do not export wall items" />
                   <Slider fx:id="ratelimiter" layoutX="82.0" layoutY="80.0" prefHeight="14.0" prefWidth="219.0" value="22.0" />
                   <Label layoutX="13.0" layoutY="78.0" text="Ratelimit:" />
-                  <CheckBox fx:id="onTopCbx" layoutX="576.0" layoutY="213.0" mnemonicParsing="false" onAction="#alwaysOnTopClick" text="Always on top" />
+                  <CheckBox fx:id="onTopCbx" layoutX="576.0" layoutY="228.0" mnemonicParsing="false" onAction="#alwaysOnTopClick" text="Always on top" />
                   <Button layoutX="522.0" layoutY="195.0" mnemonicParsing="false" onAction="#clearWiredClick" prefHeight="25.0" prefWidth="150.0" text="Clear Wired Cache" />
                   <CheckBox fx:id="useRoomFurniCbx" layoutX="14.0" layoutY="127.0" mnemonicParsing="false" text="Use room furni" />
                   <Label fx:id="donateLabel" layoutX="13.0" layoutY="111.0" text="Self-donate:" visible="false" />
