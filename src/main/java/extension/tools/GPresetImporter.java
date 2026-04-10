@@ -251,15 +251,21 @@ public class GPresetImporter {
                     }
                 }
                 else {
-                    prepare();
+                    HPoint parsedRoot = null;
                     try {
                         String[] split = text.split(" ", 2);
                         String[] loc = split[1].split(", ?");
                         int rootX = Integer.parseInt(loc[0]);
                         int rootY = Integer.parseInt(loc[1]);
-                        rootLocation = new HPoint(rootX, rootY);
+                        parsedRoot = new HPoint(rootX, rootY);
                     }
                     catch (Exception ignore) {}
+
+                    prepare(parsedRoot != null);
+
+                    if (parsedRoot != null) {
+                        rootLocation = parsedRoot;
+                    }
 
                     if (rootLocation != null && state == BuildingImportState.AWAITING_ROOT_LOCATION
                             && workingPresetConfig != null && workingPresetConfig.getFurniture().isEmpty()) {
@@ -293,7 +299,7 @@ public class GPresetImporter {
         }
     }
 
-    private void prepare() {
+    private void prepare(boolean hasInlineCoords) {
         if (presetConfig != null) {
 //            workingPostConfig = postConfig;
             workingPresetConfig = new PresetConfig(presetConfig.toJsonObject());
@@ -309,7 +315,9 @@ public class GPresetImporter {
 
             if (wallOnly) {
                 state = BuildingImportState.AWAITING_ROOT_LOCATION;
-                extension.sendVisualChatInfo("Select where the preset should be imported");
+                if (!hasInlineCoords) {
+                    extension.sendVisualChatInfo("Select where the preset should be imported");
+                }
                 return;
             }
 
@@ -465,7 +473,6 @@ public class GPresetImporter {
                 }
             }
         }).start();
-        extension.sendVisualChatInfo("Placing wall items...");
     }
 
     Map<Integer, LinkedList<HInventoryItem>> inventoryCache = new HashMap<>();
@@ -867,16 +874,25 @@ public class GPresetImporter {
         if (wallFurniture == null || wallFurniture.isEmpty()) return;
 
         extension.sendVisualChatInfo("Placing wall items..");
+        extension.getLogger().log(String.format("Placing %d wall item(s)...", wallFurniture.size()), "orange");
         FurniDataTools furniData = extension.getFurniDataTools();
         Inventory inventory = extension.getInventory();
         BCCatalog catalog = extension.getCatalog();
         ItemSource source = postConfig.getItemSource();
         FloorState floor = extension.getFloorState();
+        boolean canWired = extension.getPermissions().canModifyWired();
 
         List<int[]> wallItemStateQueue = new ArrayList<>();
+        int wiredCorrectionCount = 0;
 
+        int wallIndex = 0;
         for (PresetWallFurni wallFurni : wallFurniture) {
             if (state != BuildingImportState.MOVE_FURNITURE) break;
+            wallIndex++;
+
+            if (wallIndex % 10 == 0 || wallIndex == 1) {
+                extension.getLogger().log(String.format("Placing wall items.. (%d/%d)", wallIndex, wallFurniture.size()), "orange");
+            }
 
             String className = wallFurni.getClassName();
             String wallState = wallFurni.getState() != null ? wallFurni.getState() : "";
@@ -950,6 +966,10 @@ public class GPresetImporter {
                 useBC = false;
             }
 
+            // Always track wall item IDs before placement to detect the new one
+            Set<Integer> wallIdsBefore = new HashSet<>();
+            for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
+
             if (useBC) {
                 if (offerId == -1) {
                     if (!extension.allowIncompleteBuilds()) {
@@ -959,10 +979,6 @@ public class GPresetImporter {
                         extension.sendVisualChatInfo(String.format("Couldn't find wall item '%s' in BC catalog.. continuing", className));
                     }
                     continue;
-                }
-                Set<Integer> wallIdsBefore = new HashSet<>();
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
                 }
 
                 extension.sendToServer(new HPacket(
@@ -975,20 +991,6 @@ public class GPresetImporter {
                         false
                 ));
                 Utils.sleep(230);
-
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) {
-                        if (!wallIdsBefore.contains(wi.getId())) {
-                            if (!wallState.equals(wi.getState())) {
-                                try {
-                                    int targetStateInt = Integer.parseInt(wallState);
-                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
-                                } catch (NumberFormatException ignored) {}
-                            }
-                            break;
-                        }
-                    }
-                }
             } else {
                 if (inventoryItems.isEmpty()) {
                     if (!extension.allowIncompleteBuilds()) {
@@ -1001,12 +1003,6 @@ public class GPresetImporter {
                 }
 
                 HInventoryItem item = inventoryItems.pollFirst();
-
-                Set<Integer> wallIdsBefore = new HashSet<>();
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
-                }
-
                 String placeCmd = item.getId() + " " + locationString;
 
                 extension.sendToServer(new HPacket(
@@ -1014,29 +1010,79 @@ public class GPresetImporter {
                         HMessage.Direction.TOSERVER,
                         placeCmd
                 ));
-
                 Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+            }
 
-                if (!isPoster && !wallState.isEmpty()) {
-                    for (HWallItem wi : floor.getWallItems()) {
-                        if (!wallIdsBefore.contains(wi.getId())) {
-                            if (!wallState.equals(wi.getState())) {
-                                try {
-                                    int targetStateInt = Integer.parseInt(wallState);
-                                    wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
-                                } catch (NumberFormatException ignored) {}
-                            }
-                            break;
+            // Detect the newly placed wall item
+            int newWallItemId = -1;
+            for (HWallItem wi : floor.getWallItems()) {
+                if (!wallIdsBefore.contains(wi.getId())) {
+                    newWallItemId = wi.getId();
+
+                    // Queue state change if needed
+                    if (!isPoster && !wallState.isEmpty() && !wallState.equals(wi.getState())) {
+                        try {
+                            int targetStateInt = Integer.parseInt(wallState);
+                            wallItemStateQueue.add(new int[]{wi.getId(), targetStateInt});
+                        } catch (NumberFormatException ignored) {}
+                    }
+                    break;
+                }
+            }
+
+            // Use wired to correct position only if placement didn't match target
+            if (canWired && newWallItemId != -1) {
+                HWallItem placedItem = floor.wallItemFromId(newWallItemId);
+                if (placedItem != null) {
+                    try {
+                        WallPosition actualPos = new WallPosition(placedItem.getLocation());
+                        boolean positionMismatch = actualPos.getX() != absX
+                                || actualPos.getY() != absY
+                                || actualPos.getAltitude() != absAltitude
+                                || actualPos.getOffsetY() != relPos.getOffsetY();
+
+                        if (positionMismatch) {
+                            wiredCorrectionCount++;
+                            int sleepTime = Math.max(extension.getSafeFeedbackTimeout(), 60);
+
+                            // -120 = position.x
+                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                                    0, newWallItemId, "-120", absX, 0));
+                            Utils.sleep(sleepTime);
+
+                            // -121 = position.y
+                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                                    0, newWallItemId, "-121", absY, 0));
+                            Utils.sleep(sleepTime);
+
+                            // -123 = altitude
+                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                                    0, newWallItemId, "-123", absAltitude, 0));
+                            Utils.sleep(sleepTime);
+
+                            // -190 = wall item offset
+                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                                    0, newWallItemId, "-190", relPos.getOffsetY(), 0));
+                            Utils.sleep(sleepTime);
                         }
+                    } catch (IllegalArgumentException ignored) {
+                        // couldn't parse actual wall position, skip correction
                     }
                 }
             }
         }
 
+        if (wiredCorrectionCount > 0) {
+            extension.getLogger().log(String.format("Corrected %d wall item position(s) via wired", wiredCorrectionCount), "orange");
+        }
+
         if (!wallItemStateQueue.isEmpty()) {
             extension.sendVisualChatInfo("Setting wall item states..");
-            for (int[] entry : wallItemStateQueue) {
+            extension.getLogger().log(String.format("Setting %d wall item state(s)...", wallItemStateQueue.size()), "orange");
+
+            for (int i = 0; i < wallItemStateQueue.size(); i++) {
                 if (state != BuildingImportState.MOVE_FURNITURE) break;
+                int[] entry = wallItemStateQueue.get(i);
                 int wallItemId = entry[0];
                 int targetState = entry[1];
 
@@ -1053,8 +1099,14 @@ public class GPresetImporter {
                     currentState = wallItem != null ? wallItem.getState() : currentState;
                     attempts++;
                 }
+
+                if ((i + 1) % 10 == 0 || i == wallItemStateQueue.size() - 1) {
+                    extension.getLogger().log(String.format("Setting wall item states.. (%d/%d)", i + 1, wallItemStateQueue.size()), "orange");
+                }
             }
         }
+
+        extension.getLogger().log("Wall items placement complete", "green");
     }
 
     private void placePresetStackTiles() {
