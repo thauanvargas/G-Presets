@@ -188,7 +188,7 @@ public class AvailabilityChecker {
             boolean bcAvailable = false;
             if (catalog != null && catalog.getState() == BCCatalog.CatalogState.COLLECTED) {
                 bcAvailable = catalog.getWallProduct(typeId, state) != null;
-            } else if (details != null && details.offerId != -1) {
+            } else if (details != null && details.isBC) {
                 bcAvailable = true;
             }
 

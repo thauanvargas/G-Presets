@@ -484,7 +484,7 @@ public class GPresetExporter {
                         oldLocation.getOffsetX(),
                         oldLocation.getOffsetY(),
                         oldLocation.getDirection(),
-                        oldLocation.getAltitude() - 100 * lowestFloorPoint
+                        oldLocation.getAltitude()
                 ));
             });
             wiredLists.forEach(l -> l.forEach((Consumer<PresetWiredBase>) w -> {

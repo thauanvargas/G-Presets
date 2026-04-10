@@ -869,6 +869,11 @@ public class GPresetImporter {
         }
     }
 
+    private void sendWiredVariable(int objectId, String variableId, int value) {
+        extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                0, -objectId, variableId, value, 0));
+    }
+
     private void placeWallItems() {
         List<PresetWallFurni> wallFurniture = workingPresetConfig.getWallFurniture();
         if (wallFurniture == null || wallFurniture.isEmpty()) return;
@@ -905,7 +910,7 @@ public class GPresetImporter {
             WallPosition relPos = wallFurni.getLocation();
             int absX = relPos.getX() + rootLocation.getX();
             int absY = relPos.getY() + rootLocation.getY();
-            int absAltitude = relPos.getAltitude() + heightOffset * 100;
+            int absAltitude = relPos.getAltitude();
 
             WallPosition absPos = new WallPosition(
                     absX, absY,
@@ -944,7 +949,8 @@ public class GPresetImporter {
 
             int offerId = bcProduct != null ? bcProduct.getOfferId() : -1;
             int pageId = bcProduct != null ? bcProduct.getPageId() : -1;
-            if (offerId == -1 && furniData.getWallItemDetails(className) != null) {
+            if (offerId == -1 && furniData.getWallItemDetails(className) != null
+                    && furniData.getWallItemDetails(className).isBC) {
                 offerId = furniData.getWallItemDetails(className).offerId;
                 pageId = -1;
             }
@@ -968,7 +974,18 @@ public class GPresetImporter {
 
             // Always track wall item IDs before placement to detect the new one
             Set<Integer> wallIdsBefore = new HashSet<>();
-            for (HWallItem wi : floor.getWallItems()) wallIdsBefore.add(wi.getId());
+            String safeLocationString = null;
+            for (HWallItem wi : floor.getWallItems()) {
+                wallIdsBefore.add(wi.getId());
+                if (safeLocationString == null) {
+                    safeLocationString = wi.getLocation();
+                }
+            }
+            if (safeLocationString == null) {
+                safeLocationString = ":w=0,0 l=0,0 l";
+            }
+
+            boolean placedAtSafeLocation = false;
 
             if (useBC) {
                 if (offerId == -1) {
@@ -991,6 +1008,25 @@ public class GPresetImporter {
                         false
                 ));
                 Utils.sleep(230);
+
+                // Check if placement succeeded, if not retry at safe position
+                boolean found = false;
+                for (HWallItem wi : floor.getWallItems()) {
+                    if (!wallIdsBefore.contains(wi.getId())) { found = true; break; }
+                }
+                if (!found && canWired) {
+                    extension.sendToServer(new HPacket(
+                            "BuildersClubPlaceWallItem",
+                            HMessage.Direction.TOSERVER,
+                            pageId,
+                            offerId,
+                            wallState,
+                            safeLocationString,
+                            false
+                    ));
+                    Utils.sleep(230);
+                    placedAtSafeLocation = true;
+                }
             } else {
                 if (inventoryItems.isEmpty()) {
                     if (!extension.allowIncompleteBuilds()) {
@@ -1011,6 +1047,22 @@ public class GPresetImporter {
                         placeCmd
                 ));
                 Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+
+                // Check if placement succeeded, if not retry at safe position
+                boolean found = false;
+                for (HWallItem wi : floor.getWallItems()) {
+                    if (!wallIdsBefore.contains(wi.getId())) { found = true; break; }
+                }
+                if (!found && canWired) {
+                    String safePlaceCmd = item.getId() + " " + safeLocationString;
+                    extension.sendToServer(new HPacket(
+                            "PlaceObject",
+                            HMessage.Direction.TOSERVER,
+                            safePlaceCmd
+                    ));
+                    Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+                    placedAtSafeLocation = true;
+                }
             }
 
             // Detect the newly placed wall item
@@ -1030,43 +1082,45 @@ public class GPresetImporter {
                 }
             }
 
-            // Use wired to correct position only if placement didn't match target
             if (canWired && newWallItemId != -1) {
-                HWallItem placedItem = floor.wallItemFromId(newWallItemId);
-                if (placedItem != null) {
-                    try {
-                        WallPosition actualPos = new WallPosition(placedItem.getLocation());
-                        boolean positionMismatch = actualPos.getX() != absX
-                                || actualPos.getY() != absY
-                                || actualPos.getAltitude() != absAltitude
-                                || actualPos.getOffsetY() != relPos.getOffsetY();
+                int actualX = -1, actualY = -1, actualAlt = -1, actualOffsetY = Integer.MIN_VALUE;
+                boolean hasMismatch = placedAtSafeLocation;
 
-                        if (positionMismatch) {
-                            wiredCorrectionCount++;
-                            int sleepTime = Math.max(extension.getSafeFeedbackTimeout(), 60);
+                if (!placedAtSafeLocation) {
+                    HWallItem placedItem = floor.wallItemFromId(newWallItemId);
+                    if (placedItem != null) {
+                        try {
+                            WallPosition actualPos = new WallPosition(placedItem.getLocation());
+                            actualX = actualPos.getX();
+                            actualY = actualPos.getY();
+                            actualAlt = actualPos.getAltitude();
+                            actualOffsetY = actualPos.getOffsetY();
+                            hasMismatch = actualX != absX || actualY != absY
+                                    || actualAlt != absAltitude || actualOffsetY != relPos.getOffsetY();
+                        } catch (IllegalArgumentException ignored) {}
+                    }
+                }
 
-                            // -120 = position.x
-                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
-                                    0, newWallItemId, "-120", absX, 0));
-                            Utils.sleep(sleepTime);
+                if (hasMismatch) {
+                    wiredCorrectionCount++;
+                    int sleepTime = Math.max(extension.getSafeFeedbackTimeout(), 100);
+                    Utils.sleep(300);
 
-                            // -121 = position.y
-                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
-                                    0, newWallItemId, "-121", absY, 0));
-                            Utils.sleep(sleepTime);
-
-                            // -123 = altitude
-                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
-                                    0, newWallItemId, "-123", absAltitude, 0));
-                            Utils.sleep(sleepTime);
-
-                            // -190 = wall item offset
-                            extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
-                                    0, newWallItemId, "-190", relPos.getOffsetY(), 0));
-                            Utils.sleep(sleepTime);
-                        }
-                    } catch (IllegalArgumentException ignored) {
-                        // couldn't parse actual wall position, skip correction
+                    if (placedAtSafeLocation || actualX != absX) {
+                        sendWiredVariable(newWallItemId, "-120", absX);
+                        Utils.sleep(sleepTime);
+                    }
+                    if (placedAtSafeLocation || actualY != absY) {
+                        sendWiredVariable(newWallItemId, "-121", absY);
+                        Utils.sleep(sleepTime);
+                    }
+                    if (placedAtSafeLocation || actualOffsetY != relPos.getOffsetY()) {
+                        sendWiredVariable(newWallItemId, "-190", relPos.getOffsetY());
+                        Utils.sleep(sleepTime);
+                    }
+                    if (placedAtSafeLocation || actualAlt != absAltitude) {
+                        sendWiredVariable(newWallItemId, "-123", absAltitude);
+                        Utils.sleep(sleepTime);
                     }
                 }
             }
@@ -1089,15 +1143,20 @@ public class GPresetImporter {
                 HWallItem wallItem = floor.wallItemFromId(wallItemId);
                 if (wallItem == null) continue;
 
-                String currentState = wallItem.getState();
-                int attempts = 0;
-                while (state != BuildingImportState.NONE && !String.valueOf(targetState).equals(currentState) && attempts < 20) {
-                    extension.sendToServer(new HPacket("UseWallItem", HMessage.Direction.TOSERVER, wallItemId, 0));
-                    Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
+                if (canWired) {
+                    sendWiredVariable(wallItemId, "-110", targetState);
+                    Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 60));
+                } else {
+                    String currentState = wallItem.getState();
+                    int attempts = 0;
+                    while (state != BuildingImportState.NONE && !String.valueOf(targetState).equals(currentState) && attempts < 20) {
+                        extension.sendToServer(new HPacket("UseWallItem", HMessage.Direction.TOSERVER, wallItemId, 0));
+                        Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 100));
 
-                    wallItem = floor.wallItemFromId(wallItemId);
-                    currentState = wallItem != null ? wallItem.getState() : currentState;
-                    attempts++;
+                        wallItem = floor.wallItemFromId(wallItemId);
+                        currentState = wallItem != null ? wallItem.getState() : currentState;
+                        attempts++;
+                    }
                 }
 
                 if ((i + 1) % 10 == 0 || i == wallItemStateQueue.size() - 1) {
