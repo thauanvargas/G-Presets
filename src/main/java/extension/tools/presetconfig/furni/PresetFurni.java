@@ -4,6 +4,9 @@ import extension.tools.presetconfig.PresetJsonConfigurable;
 import gearth.extensions.parsers.HPoint;
 import org.json.JSONObject;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class PresetFurni implements PresetJsonConfigurable {
 
     private int furniId;
@@ -11,6 +14,7 @@ public class PresetFurni implements PresetJsonConfigurable {
     private HPoint location; // relative to selection, both x & y & z matter
     private int rotation;
     private String state;    // only if category = legacystuffdata (0), only apply if UseFurniture packet works
+    private Map<String, Integer> variables; // keyed by variable name, associated to this className + x + y + z
 
     private String furniName = null; // uniquely given name by GPresets, based on furniId and className
 
@@ -34,6 +38,7 @@ public class PresetFurni implements PresetJsonConfigurable {
         this.rotation = furni.rotation;
         this.state = furni.state;
         this.furniName = furni.furniName;
+        this.variables = furni.variables == null ? null : new HashMap<>(furni.variables);
     }
 
     public PresetFurni(JSONObject jsonObject) {
@@ -48,6 +53,14 @@ public class PresetFurni implements PresetJsonConfigurable {
         this.rotation = jsonObject.getInt("rotation");
         this.state = jsonObject.has("state") ? jsonObject.getString("state") : null;
         this.furniName = jsonObject.getString("name"); // required when parsing from jsonobject
+
+        if (jsonObject.has("variables")) {
+            this.variables = new HashMap<>();
+            JSONObject vars = jsonObject.getJSONObject("variables");
+            for (String key : vars.keySet()) {
+                this.variables.put(key, vars.getInt(key));
+            }
+        }
     }
 
     @Override
@@ -66,6 +79,10 @@ public class PresetFurni implements PresetJsonConfigurable {
 
         if (state != null) {
             object.put("state", state);
+        }
+
+        if (variables != null && !variables.isEmpty()) {
+            object.put("variables", new JSONObject(variables));
         }
 
 //        if (furniName != null) {
@@ -122,5 +139,13 @@ public class PresetFurni implements PresetJsonConfigurable {
 
     public String getFurniName() {
         return furniName;
+    }
+
+    public Map<String, Integer> getVariables() {
+        return variables;
+    }
+
+    public void setVariables(Map<String, Integer> variables) {
+        this.variables = variables;
     }
 }

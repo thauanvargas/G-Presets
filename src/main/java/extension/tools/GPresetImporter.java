@@ -113,7 +113,6 @@ public class GPresetImporter {
         extension.intercept(HMessage.Direction.TOSERVER, "PlaceObject", this::maybeBlockPlacements);
         extension.intercept(HMessage.Direction.TOSERVER, "BuildersClubPlaceRoomItem", this::maybeBlockPlacements);
 
-        extension.intercept(HMessage.Direction.TOSERVER, "MoveObject", this::blockFurniAdjustments);
         extension.intercept(HMessage.Direction.TOSERVER, "UseFurniture", this::blockFurniAdjustments);
         extension.intercept(HMessage.Direction.TOSERVER, "SetCustomStackingHeight", this::blockFurniAdjustments);
         extension.intercept(HMessage.Direction.TOSERVER, "UpdateCondition", this::blockFurniAdjustments);
@@ -540,6 +539,7 @@ public class GPresetImporter {
             }
 
             if(useRoomFurni && inventoryItems.isEmpty()) {
+                extension.getLogger().log(String.format("[UseRoomFurni] Looking for '%s' (typeId=%d) in room rectangle (furniId=%d)", className, dropInfo.getTypeId(), dropInfo.getFurniId()), "orange");
                 HFloorItem floorItem = roomItemsList
                         .stream()
                         .filter(furni -> furni.getTypeId() == dropInfo.getTypeId() && isInsideUseRoomRectangle(furni.getTile().getX(), furni.getTile().getY()))
@@ -549,8 +549,11 @@ public class GPresetImporter {
                 if (floorItem != null) {
                     roomItemsList.removeIf(item -> item.getId() == floorItem.getId());
 
-                    realFurniIdMap.put(dropInfo.getTypeId(), floorItem.getId());
-
+                    int furniMapKey = dropInfo.getFurniId() >= 0 ? dropInfo.getFurniId() : dropInfo.getTypeId();
+                    realFurniIdMap.put(furniMapKey, floorItem.getId());
+                    extension.getLogger().log(String.format("[UseRoomFurni] Found '%s' (id=%d at %d,%d), mapping presetFurniId=%d -> roomId=%d, moving to %d,%d rot=%d",
+                            className, floorItem.getId(), floorItem.getTile().getX(), floorItem.getTile().getY(),
+                            furniMapKey, floorItem.getId(), dropInfo.getX(), dropInfo.getY(), dropInfo.getRotation()), "orange");
                     HPacket packet = new HPacket("MoveObject", HMessage.Direction.TOSERVER, floorItem.getId(), dropInfo.getX(), dropInfo.getY(), dropInfo.getRotation());
                     extension.sendToServer(packet);
 
@@ -558,9 +561,11 @@ public class GPresetImporter {
                 }
                 else if (!extension.allowIncompleteBuilds()) {
                     state = BuildingImportState.NONE;
+                    extension.getLogger().log(String.format("[UseRoomFurni] ERROR: '%s' not found in rectangle (roomItems remaining=%d)", className, roomItemsList.size()), "red");
                     extension.sendVisualChatInfo(String.format("ERROR: Couldn't find '%s' in inventory or room.. aborting", className));
                 }
                 else {
+                    extension.getLogger().log(String.format("[UseRoomFurni] WARN: '%s' not found in rectangle, continuing", className), "orange");
                     extension.sendVisualChatInfo(String.format("Couldn't find '%s' in inventory or room.. continuing", className));
                 }
 
@@ -601,22 +606,32 @@ public class GPresetImporter {
     }
 
     private void moveFurni(int furniId, int x, int y, int rot, boolean moveStackTile, double height) {
+        boolean stackTileMoved = false;
         if (moveStackTile) {
             StackTileInfo stackInfo = StackTileUtils.findBestDropLocation(x, y, allAvailableStackTiles, extension.getFloorState());
             if (stackInfo != null) {
                 moveFurni(stackInfo.getFurniId(), stackInfo.getLocation().getX(), stackInfo.getLocation().getY(),
                         stackInfo.getRotation(), false, -1);
+                stackTileMoved = true;
                 if (height != -1) {
+                    int localFloor = PresetUtils.heightFromChar(extension.getFloorState().floorHeight(x, y));
+                    if (localFloor >= 256) localFloor = 0; // unknown / out-of-bounds tile -> assume z=0
+                    int heightCenti = ((int) (height * 100)) + localFloor * 100;
                     extension.sendToServer(new HPacket(
                             "SetCustomStackingHeight",
                             HMessage.Direction.TOSERVER,
                             stackInfo.getFurniId(),
-                            ((int) (height * 100)) + heightOffset * 100
+                            heightCenti
                     ));
 
                     Utils.sleep(40);
                 }
             }
+        }
+
+        // Wait for the HeightMapUpdate after the stacktile move; without wired perms the server rejects the item move otherwise.
+        if (stackTileMoved) {
+            Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 200));
         }
 
         extension.sendToServer(new HPacket(
@@ -860,6 +875,11 @@ public class GPresetImporter {
             placePresetStackTiles();
         }
 
+        // Apply object variables only after all floor furni exist in room and IDs are mapped.
+        if (state == BuildingImportState.MOVE_FURNITURE) {
+            applyFloorFurniVariables();
+        }
+
         synchronized (lock) {
             if (state == BuildingImportState.MOVE_FURNITURE) {
                 state = BuildingImportState.NONE;
@@ -872,6 +892,144 @@ public class GPresetImporter {
     private void sendWiredVariable(int objectId, String variableId, int value) {
         extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
                 0, -objectId, variableId, value, 0));
+    }
+
+    private void sendFloorObjectVariableById(int objectId, String variableId, int value) {
+        // mode 1 = attach the (existing) variable to this object and set its initial value.
+        // This matches what the client sends in WiredMenuInspectionTab.onCreateVariableClicked.
+        extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                0, objectId, variableId, value, 1));
+    }
+
+    private void sendFloorObjectVariable(int objectId, String variableName, int value) {
+        extension.sendToServer(new HPacket("WiredSetObjectVariableValue", HMessage.Direction.TOSERVER,
+                0, objectId, variableName, value, 1));
+    }
+
+    private void applyFloorFurniVariables() {
+        if (workingPresetConfig == null || workingPresetConfig.getFurniture() == null || workingPresetConfig.getFurniture().isEmpty()) {
+            return;
+        }
+
+        if (!extension.getPermissions().canModifyWired()) {
+            extension.getLogger().log("Skipping floor furni variables - no wired permissions", "orange");
+            return;
+        }
+
+        // Refresh variable id mapping from the server before applying. Required so that variables created during
+        // setupWired (or already present in the room) resolve to their current server-assigned ids.
+        if (workingPresetConfig != null && workingPresetConfig.getPresetWireds() != null) {
+            HashMap<String, String> nameToOldId = workingPresetConfig.getPresetWireds().getVariablesMap();
+            boolean needAny = false;
+            if (nameToOldId != null) {
+                for (PresetFurni pf : workingPresetConfig.getFurniture()) {
+                    Map<String, Integer> vars = pf.getVariables();
+                    if (vars == null) continue;
+                    for (String name : vars.keySet()) {
+                        String oldId = nameToOldId.get(name);
+                        if (oldId != null && !realVariableIdMap.containsKey(oldId)) {
+                            needAny = true;
+                            break;
+                        }
+                    }
+                    if (needAny) break;
+                }
+            }
+            if (needAny) {
+                BuildingImportState prev = state;
+                state = BuildingImportState.SETUP_WIRED; // onWiredAllVariables only fires in SETUP_WIRED
+                wiredVariableConfirmation.drainPermits();
+                extension.sendToServer(new HPacket("WiredGetAllVariablesDiffs", HMessage.Direction.TOSERVER, 0));
+                try { wiredVariableConfirmation.tryAcquire(5, TimeUnit.SECONDS); } catch (InterruptedException e) {}
+                state = prev;
+            }
+        }
+
+        List<PresetFurni> furniture = workingPresetConfig.getFurniture();
+        int totalAssignments = 0;
+        for (PresetFurni presetFurni : furniture) {
+            Map<String, Integer> variables = presetFurni.getVariables();
+            if (variables == null || variables.isEmpty()) {
+                continue;
+            }
+
+            for (Map.Entry<String, Integer> entry : variables.entrySet()) {
+                String variableName = entry.getKey();
+                Integer value = entry.getValue();
+                if (variableName == null || variableName.isEmpty() || value == null || variableName.startsWith("@")) {
+                    continue;
+                }
+                totalAssignments++;
+            }
+        }
+
+        if (totalAssignments > 0) {
+            extension.sendVisualChatInfo(String.format("Applying %d floor furni variable assignment(s)..", totalAssignments));
+            extension.getLogger().log(String.format("Applying floor furni variables.. (%d left)", totalAssignments), "orange");
+        }
+
+        int assignments = 0;
+        int sinceLastProgressLog = 0;
+
+        for (PresetFurni presetFurni : furniture) {
+            if (state != BuildingImportState.MOVE_FURNITURE) {
+                return;
+            }
+
+            Map<String, Integer> variables = presetFurni.getVariables();
+            if (variables == null || variables.isEmpty()) {
+                continue;
+            }
+
+            Integer realId = realFurniIdMap.get(presetFurni.getFurniId());
+            if (realId == null) {
+                continue;
+            }
+
+            for (Map.Entry<String, Integer> entry : variables.entrySet()) {
+                if (state != BuildingImportState.MOVE_FURNITURE) {
+                    return;
+                }
+
+                String variableName = entry.getKey();
+                Integer value = entry.getValue();
+                if (variableName == null || variableName.isEmpty() || value == null || variableName.startsWith("@")) {
+                    continue;
+                }
+
+                // Variable ids are server-generated. Resolve the per-furni variable NAME to the new server id
+                // via variables_map (name -> old id) + realVariableIdMap (old id -> new id).
+                String resolvedRealId = null;
+                HashMap<String, String> nameToOldId = workingPresetConfig.getPresetWireds() == null
+                        ? null : workingPresetConfig.getPresetWireds().getVariablesMap();
+                if (nameToOldId != null) {
+                    String oldId = nameToOldId.get(variableName);
+                    if (oldId != null) {
+                        resolvedRealId = realVariableIdMap.get(oldId);
+                    }
+                }
+
+                if (resolvedRealId != null) {
+                    sendFloorObjectVariableById(realId, resolvedRealId, value);
+                } else {
+                    sendFloorObjectVariable(realId, variableName, value);
+                }
+                assignments++;
+                sinceLastProgressLog++;
+
+                if (sinceLastProgressLog >= 10 || assignments == totalAssignments) {
+                    int left = Math.max(0, totalAssignments - assignments);
+                    extension.getLogger().log(String.format("Applying floor furni variables.. (%d left)", left), "orange");
+                    sinceLastProgressLog = 0;
+                }
+
+                Utils.sleep(Math.max(extension.getSafeFeedbackTimeout(), 60));
+            }
+        }
+
+        if (assignments > 0) {
+            extension.getLogger().log(String.format("Applied %d floor furni variable assignment(s)", assignments), "orange");
+        }
     }
 
     private void placeWallItems() {
@@ -1223,9 +1381,11 @@ public class GPresetImporter {
                 // Move to correct position
                 moveFurni(realId, targetX, targetY, targetRot, false, -1);
 
-                // Set custom stacking height from the Z coordinate
+                // Set custom stacking height from the Z coordinate (use local floor at target tile)
                 double z = stackTileFurni.getLocation().getZ();
-                int heightCenti = ((int) (z * 100)) + heightOffset * 100;
+                int localFloor = PresetUtils.heightFromChar(extension.getFloorState().floorHeight(targetX, targetY));
+                if (localFloor >= 256) localFloor = 0;
+                int heightCenti = ((int) (z * 100)) + localFloor * 100;
                 extension.sendToServer(new HPacket(
                         "SetCustomStackingHeight",
                         HMessage.Direction.TOSERVER,
@@ -1405,7 +1565,8 @@ public class GPresetImporter {
                             stackTileLocation.getY(),
                             furniData.getFloorTypeId(f.getClassName()),
                             postConfig.getItemSource(),
-                            0);
+                            0,
+                            f.getFurniId());
                     furniDropInfos.add(dropInfo);
 
                     String key = String.format("%d|%d|%d", dropInfo.getX(), dropInfo.getY(), dropInfo.getTypeId());
