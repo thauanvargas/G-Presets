@@ -98,8 +98,6 @@ public class GPresetImporter {
     private List<HFloorItem> roomItemsList = new ArrayList<>();
 //    private HPoint originalStackTileLocation = new HPoint(0, 0); // move back after movements
 
-    private int heightOffset = 0;
-
     public GPresetImporter(GPresets extension) {
         this.extension = extension;
 
@@ -450,8 +448,6 @@ public class GPresetImporter {
                 if (workingPresetConfig.getFurniture().isEmpty()) {
                     startWallOnlyImport();
                 } else {
-                    heightOffset = PresetUtils.lowestFloorPoint(extension.getFloorState(), workingPresetConfig, rootLocation);
-
                     state = BuildingImportState.ADD_UNSTACKABLES;
                     new Thread(this::addUnstackables).start();
                     extension.sendVisualChatInfo("Adding furniture...");
@@ -614,14 +610,11 @@ public class GPresetImporter {
                         stackInfo.getRotation(), false, -1);
                 stackTileMoved = true;
                 if (height != -1) {
-                    int localFloor = PresetUtils.heightFromChar(extension.getFloorState().floorHeight(x, y));
-                    if (localFloor >= 256) localFloor = 0; // unknown / out-of-bounds tile -> assume z=0
-                    int heightCenti = ((int) (height * 100)) + localFloor * 100;
                     extension.sendToServer(new HPacket(
                             "SetCustomStackingHeight",
                             HMessage.Direction.TOSERVER,
                             stackInfo.getFurniId(),
-                            heightCenti
+                            (int) (height * 100)
                     ));
 
                     Utils.sleep(40);
@@ -1328,12 +1321,12 @@ public class GPresetImporter {
 
     private void placePresetStackTiles() {
         FurniDataTools furniData = extension.getFurniDataTools();
-        FloorState floor = extension.getFloorState();
         List<PresetFurni> presetStackTiles = new ArrayList<>();
 
         synchronized (lock) {
             for (PresetFurni f : workingPresetConfig.getFurniture()) {
-                if (isStackTileClass(f.getClassName()) && furniData.isStackable(f.getClassName())) {
+                if (isStackTileClass(f.getClassName()) && furniData.isStackable(f.getClassName())
+                        && realFurniIdMap.containsKey(f.getFurniId())) {
                     presetStackTiles.add(f);
                 }
             }
@@ -1349,54 +1342,28 @@ public class GPresetImporter {
             int targetX = stackTileFurni.getLocation().getX() + rootLocation.getX();
             int targetY = stackTileFurni.getLocation().getY() + rootLocation.getY();
             int targetRot = stackTileFurni.getRotation();
+            int realId = realFurniIdMap.get(stackTileFurni.getFurniId());
 
-            // Track items before drop to identify the new one
-            Set<Integer> idsBefore = new HashSet<>();
-            for (HFloorItem fi : floor.getItems()) idsBefore.add(fi.getId());
+            // Move to correct position
+            moveFurni(realId, targetX, targetY, targetRot, false, -1);
 
-            // Drop at the helper stack tile location
-            FurniDropInfo dropInfo = new FurniDropInfo(
-                    stackTileLocation.getX(),
-                    stackTileLocation.getY(),
-                    furniData.getFloorTypeId(stackTileFurni.getClassName()),
-                    postConfig.getItemSource(),
-                    0
-            );
-            dropFurni(dropInfo);
-            Utils.sleep(300);
+            // Set custom stacking height from the Z coordinate.
+            // Preset z is already stored relative to the source floor's lowest point
+            // (see GPresetExporter), and the destination floor height is automatically
+            // applied by the server, so we send z*100 directly. Adding the destination
+            // floor offset here would double-stack on elevated tiles.
+            double z = stackTileFurni.getLocation().getZ();
+            int heightCenti = (int) (z * 100);
+            extension.sendToServer(new HPacket(
+                    "SetCustomStackingHeight",
+                    HMessage.Direction.TOSERVER,
+                    realId, heightCenti
+            ));
+            Utils.sleep(60);
 
-            // Find the newly placed item
-            HFloorItem newItem = null;
-            for (HFloorItem fi : floor.getItems()) {
-                if (!idsBefore.contains(fi.getId())) {
-                    newItem = fi;
-                    break;
-                }
-            }
-
-            if (newItem != null) {
-                int realId = newItem.getId();
-                realFurniIdMap.put(stackTileFurni.getFurniId(), realId);
-
-                // Move to correct position
-                moveFurni(realId, targetX, targetY, targetRot, false, -1);
-
-                // Set custom stacking height from the Z coordinate (use local floor at target tile)
-                double z = stackTileFurni.getLocation().getZ();
-                int localFloor = PresetUtils.heightFromChar(extension.getFloorState().floorHeight(targetX, targetY));
-                if (localFloor >= 256) localFloor = 0;
-                int heightCenti = ((int) (z * 100)) + localFloor * 100;
-                extension.sendToServer(new HPacket(
-                        "SetCustomStackingHeight",
-                        HMessage.Direction.TOSERVER,
-                        realId, heightCenti
-                ));
-                Utils.sleep(60);
-
-                // Set state if available
-                if (stackTileFurni.getState() != null) {
-                    attemptSetState(realId, stackTileFurni.getState());
-                }
+            // Set state if available
+            if (stackTileFurni.getState() != null) {
+                attemptSetState(realId, stackTileFurni.getState());
             }
         }
     }
@@ -1557,7 +1524,7 @@ public class GPresetImporter {
 
         synchronized (lock) {
             workingPresetConfig.getFurniture().forEach(f -> {
-                if (furniData.isStackable(f.getClassName()) && !isStackTileClass(f.getClassName())) {
+                if (furniData.isStackable(f.getClassName())) {
                     FurniDropInfo dropInfo = new FurniDropInfo(
                             f.getClassName().startsWith("wf_trg_") ?
                                     stackTileLocation.getX() + 1 :
@@ -1595,7 +1562,7 @@ public class GPresetImporter {
             do {
                 Utils.sleep(500);
                 synchronized (lock) {
-                    done = state != BuildingImportState.ADD_FURNITURE || expectFurniDrops.isEmpty() || j++ > 7;
+                    done = state != BuildingImportState.ADD_FURNITURE || expectFurniDrops.isEmpty() || j++ > 30;
                 }
             } while (!done);
 
