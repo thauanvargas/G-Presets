@@ -37,7 +37,17 @@ public class GPresetExporter {
     private HashMap<String, String> variableIdToName = new HashMap<>();
     private final Map<Integer, Map<String, Integer>> furniVariablesByFurniId = Collections.synchronizedMap(new HashMap<>());
     private final Set<Integer> pendingFurniVariableRequests = Collections.synchronizedSet(new HashSet<>());
+    private final Set<String> pendingVariableHolderRequests = Collections.synchronizedSet(new HashSet<>());
+    private final Set<Integer> exportAreaFurniIds = Collections.synchronizedSet(new HashSet<>());
+    private volatile long lastVariableActivityTime = 0L;
+    private volatile int totalVariableRequests = 0;
+    private volatile int sentVariableRequests = 0;
+    private volatile boolean variableRequestPhaseStarted = false;
     private boolean hasVariableMap = false;
+
+    private static final long VARIABLE_GRACE_WINDOW_MS = 3000L;
+    private static final long VARIABLE_REQUEST_INTERVAL_MS = 250L;
+    private static final int VARIABLE_MAX_RETRIES = 2;
 
     public enum PresetExportState {
         NONE,
@@ -90,6 +100,7 @@ public class GPresetExporter {
         extension.intercept(HMessage.Direction.TOCLIENT, "WiredFurniVariable", this::retrieveVariableConf);
         extension.intercept(HMessage.Direction.TOCLIENT, "WiredAllVariablesDiffs", this::onWiredAllVariables);
         extension.intercept(HMessage.Direction.TOCLIENT, "WiredVariablesForObject", this::onWiredVariablesForObject);
+        extension.intercept(HMessage.Direction.TOCLIENT, "WiredAllVariableHolders", this::onWiredAllVariableHolders);
 
         extension.intercept(HMessage.Direction.TOCLIENT, "ObjectRemove", this::onFurniRemoved);
         extension.intercept(HMessage.Direction.TOCLIENT, "RoomReady", this::onRoomReady);
@@ -101,6 +112,10 @@ public class GPresetExporter {
         variableIdToName = new HashMap<>();
         furniVariablesByFurniId.clear();
         pendingFurniVariableRequests.clear();
+        pendingVariableHolderRequests.clear();
+        exportAreaFurniIds.clear();
+        variableRequestPhaseStarted = false;
+        lastVariableActivityTime = 0L;
 
         // Per-room wired config caches: clear so that hasWiredVariables() and
         // unRegisteredWiredsInArea() never carry over data from the previous room.
@@ -123,14 +138,62 @@ public class GPresetExporter {
     }
 
     private void onWiredVariablesForObject(HMessage hMessage) {
-        if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
-            HWiredVariablesForObject inspection = new HWiredVariablesForObject(hMessage.getPacket());
+        if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
 
-            if (inspection.type == HWiredVariablesForObject.TYPE_OBJECT && inspection.objectId > 0) {
-                furniVariablesByFurniId.put(inspection.objectId, new HashMap<>(inspection.variables));
-                pendingFurniVariableRequests.remove(inspection.objectId);
-                maybeFinishExportAfterRetrieve();
+        HWiredVariablesForObject inspection = new HWiredVariablesForObject(hMessage.getPacket());
+        if (inspection.type != HWiredVariablesForObject.TYPE_OBJECT || inspection.objectId <= 0) return;
+
+        furniVariablesByFurniId.put(inspection.objectId, new HashMap<>(inspection.variables));
+        pendingFurniVariableRequests.remove(inspection.objectId);
+        lastVariableActivityTime = System.currentTimeMillis();
+        maybeFinishExportAfterRetrieve();
+    }
+
+    private void onWiredAllVariableHolders(HMessage hMessage) {
+        if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
+
+        try {
+            HPacket packet = hMessage.getPacket();
+            packet.readInteger();
+
+            String variableId = packet.readString();
+            packet.readInteger();
+            String variableName = packet.readString();
+            packet.readInteger();
+            packet.readInteger();
+            for (int i = 0; i < 8; i++) packet.readBoolean();
+            if (packet.readBoolean()) {
+                int tcCount = packet.readInteger();
+                for (int i = 0; i < tcCount; i++) {
+                    packet.readInteger();
+                    packet.readString();
+                }
             }
+
+            int holdersCount = packet.readInteger();
+            int matched = 0;
+            for (int i = 0; i < holdersCount; i++) {
+                int objectId = packet.readInteger();
+                int value = packet.readInteger();
+                if (exportAreaFurniIds.contains(objectId)) {
+                    furniVariablesByFurniId
+                            .computeIfAbsent(objectId, k -> new HashMap<>())
+                            .put(variableId, value);
+                    matched++;
+                }
+            }
+
+            pendingVariableHolderRequests.remove(variableId);
+            lastVariableActivityTime = System.currentTimeMillis();
+
+            if (matched > 0) {
+                extension.getLogger().log(String.format(
+                        "Found %d furni holding variable '%s'", matched, variableName), "gray");
+            }
+
+            maybeFinishExportAfterRetrieve();
+        } catch (Exception e) {
+            extension.getLogger().log("Failed to parse WiredAllVariableHolders: " + e.getMessage(), "red");
         }
     }
 
@@ -349,6 +412,11 @@ public class GPresetExporter {
         exportName = null;
         wallOnlyExport = false;
         state = PresetExportState.NONE;
+        variableRequestPhaseStarted = false;
+        lastVariableActivityTime = 0L;
+        pendingFurniVariableRequests.clear();
+        pendingVariableHolderRequests.clear();
+        exportAreaFurniIds.clear();
     }
 
     public synchronized List<Integer> unRegisteredWiredsInArea(int x, int y, int dimX, int dimY) {
@@ -598,8 +666,23 @@ public class GPresetExporter {
             PresetConfigUtils.savePreset(name, presetConfig);
             extension.updateInstalledPresets();
 
+            int variableTotal = 0;
+            int furniWithVars = 0;
+            for (PresetFurni pf : allFurni) {
+                Map<String, Integer> vars = pf.getVariables();
+                if (vars != null && !vars.isEmpty()) {
+                    furniWithVars++;
+                    variableTotal += vars.size();
+                }
+            }
+            if (variableTotal > 0) {
+                extension.getLogger().log(String.format(
+                        "Exported %d furni variable%s across %d furni",
+                        variableTotal, variableTotal == 1 ? "" : "s", furniWithVars), "green");
+            }
             extension.sendVisualChatInfo(String.format(String.format("Exported \"%s\" successfully", name), name));
             extension.getLogger().log(String.format("Exported preset \"%s\" successfully", name), "green");
+
         }
         else {
             extension.sendVisualChatInfo("ERROR - Couldn't export due to unsufficient resources");
@@ -610,60 +693,100 @@ public class GPresetExporter {
 
     private void requestWiredConfigsLoop(int x, int y, int dimX, int dimY) {
         try {
-            LinkedList<Integer> linkedList;
+            // Phase 1: fetch wired configurations, retrying if some don't respond.
+            int originalRemaining;
             synchronized (lock) {
-                linkedList = new LinkedList<>(unRegisteredWiredsInArea(x, y, dimX, dimY));
+                originalRemaining = unRegisteredWiredsInArea(x, y, dimX, dimY).size();
             }
 
-            int originalRemaining = linkedList.size();
+            while (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
+                LinkedList<Integer> linkedList;
+                synchronized (lock) {
+                    linkedList = new LinkedList<>(unRegisteredWiredsInArea(x, y, dimX, dimY));
+                }
 
-            while (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS && linkedList.size() > 0) {
-                Integer wiredId = linkedList.pollFirst();
-//                Utils.sleep(570);
-                Utils.sleep(100);
-                extension.sendToServer(new HPacket("Open", HMessage.Direction.TOSERVER, wiredId));
+                while (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS && linkedList.size() > 0) {
+                    Integer wiredId = linkedList.pollFirst();
+                    Utils.sleep(100);
+                    extension.sendToServer(new HPacket("Open", HMessage.Direction.TOSERVER, wiredId));
+                }
+
+                if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
+
+                Utils.sleep(300);
+
+                int remainingLeft;
+                synchronized (lock) {
+                    remainingLeft = unRegisteredWiredsInArea(x, y, dimX, dimY).size();
+                }
+
+                if (remainingLeft == 0) break;
+                if (remainingLeft <= originalRemaining / 2) {
+                    extension.sendVisualChatInfo(String.format("WARNING - Did not retrieve all wired. Retrying %d missing wired..", remainingLeft));
+                    extension.getLogger().log(String.format("Did not retrieve all wired. Retrying %d missing wired..", remainingLeft), "orange");
+                    originalRemaining = remainingLeft;
+                    continue;
+                }
+
+                synchronized (lock) {
+                    extension.sendVisualChatInfo("ERROR - Couldn't export due to missing wired configurations");
+                    extension.getLogger().log("Couldn't export due to missing wired configurations", "red");
+                    reset();
+                }
+                return;
+            }
+
+            if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
+
+            if (!extension.shouldExportFurniVariables()) {
+                variableRequestPhaseStarted = true;
+                lastVariableActivityTime = System.currentTimeMillis() - VARIABLE_GRACE_WINDOW_MS;
+                synchronized (lock) {
+                    if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
+                        maybeFinishExportAfterRetrieve();
+                    }
+                }
+                return;
             }
 
             requestFurniVariablesInArea(x, y, dimX, dimY);
 
-            if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
-                Utils.sleep(300);
-                boolean retry = false;
-                synchronized (lock) {
-                    if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
-                        int remainingLeft = unRegisteredWiredsInArea(x, y, dimX, dimY).size();
-                            int pendingVariables = pendingFurniVariableRequests.size();
+            for (int attempt = 0; attempt <= VARIABLE_MAX_RETRIES; attempt++) {
+                while (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
+                    Utils.sleep(300);
+                    if (System.currentTimeMillis() - lastVariableActivityTime >= VARIABLE_GRACE_WINDOW_MS) break;
+                }
+                if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
 
-                            if (pendingVariables > 0) {
-                                extension.getLogger().log(String.format("Waiting on %d furni variable responses..", pendingVariables), "orange");
+                List<String> stillPending;
+                synchronized (pendingVariableHolderRequests) {
+                    stillPending = new ArrayList<>(pendingVariableHolderRequests);
+                }
+
+                if (stillPending.isEmpty() || attempt == VARIABLE_MAX_RETRIES) {
+                    synchronized (lock) {
+                        if (state == PresetExportState.FETCHING_UNKNOWN_CONFIGS) {
+                            if (!stillPending.isEmpty()) {
+                                extension.getLogger().log(String.format(
+                                        "%d variable(s) did not reply after %d attempt(s)",
+                                        stillPending.size(), attempt + 1), "orange");
                             }
-
-                        if (remainingLeft == 0) {
-                                if (pendingVariables == 0) {
-                                    // all wired and object variable data retrieved
-                                }
-                                else {
-                                    // fallback: do not block export forever if some objects don't answer
-                                    extension.getLogger().log("Proceeding export without some furni variables due to missing responses", "orange");
-                                    pendingFurniVariableRequests.clear();
-                                    maybeFinishExportAfterRetrieve();
-                                }
-                        }
-                        else if (remainingLeft <= originalRemaining / 2) {
-                            extension.sendVisualChatInfo(String.format("WARNING - Did not retrieve all wired. Retrying %d missing wired..", remainingLeft));
-                            extension.getLogger().log(String.format("Did not retrieve all wired. Retrying %d missing wired..", remainingLeft), "orange");
-                            retry = true;
-                        }
-                        else {
-                            // if it's still in this state, something failed..
-                            extension.sendVisualChatInfo("ERROR - Couldn't export due to missing wired configurations");
-                            extension.getLogger().log("Couldn't export due to missing wired configurations", "red");
-                            reset();
+                            pendingFurniVariableRequests.clear();
+                            pendingVariableHolderRequests.clear();
+                            maybeFinishExportAfterRetrieve();
                         }
                     }
+                    return;
                 }
-                if (retry) {
-                    requestWiredConfigsLoop(x, y, dimX, dimY);
+
+                extension.getLogger().log(String.format(
+                        "Retrying %d variable(s)..", stillPending.size()), "orange");
+                lastVariableActivityTime = System.currentTimeMillis();
+                for (String variableId : stillPending) {
+                    if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
+                    Utils.sleep((int) VARIABLE_REQUEST_INTERVAL_MS);
+                    extension.sendToServer(new HPacket("WiredGetAllVariableHolders", HMessage.Direction.TOSERVER, variableId));
+                    lastVariableActivityTime = System.currentTimeMillis();
                 }
             }
         }
@@ -697,10 +820,15 @@ public class GPresetExporter {
                 if (y1 > y2) y1 = y2;
 
                 int remaining = unRegisteredWiredsInArea(x1, y1, dimX, dimY).size();
-                if (remaining == 0 && hasVariableMap && pendingFurniVariableRequests.isEmpty()) {
+                long sinceVarActivity = System.currentTimeMillis() - lastVariableActivityTime;
+                boolean varGraceElapsed = sinceVarActivity >= VARIABLE_GRACE_WINDOW_MS;
+
+                if (remaining == 0 && hasVariableMap && variableRequestPhaseStarted && varGraceElapsed) {
+                    pendingFurniVariableRequests.clear();
+                    pendingVariableHolderRequests.clear();
                     export(exportName, x1, y1, dimX, dimY);
                 }
-                else if (remaining % 10 == 0) {
+                else if (remaining > 0 && remaining % 10 == 0) {
                     extension.getLogger().log(String.format("%d wired configurations left to retrieve..", remaining), "orange");
                 }
             }
@@ -818,6 +946,8 @@ public class GPresetExporter {
 
             furniVariablesByFurniId.clear();
             pendingFurniVariableRequests.clear();
+            pendingVariableHolderRequests.clear();
+            exportAreaFurniIds.clear();
 
             List<Integer> unregisteredWired = unRegisteredWiredsInArea(x, y, dimX, dimY);
             if (((!hasVariableMap && hasWiredVariables()) || unregisteredWired.size() > 0) && extension.shouldExportWired()) {
@@ -952,44 +1082,65 @@ public class GPresetExporter {
 
     private void requestFurniVariablesInArea(int x, int y, int dimX, int dimY) {
         FloorState floor = extension.getFloorState();
-        if (floor == null) {
+        if (floor == null) return;
+
+        Set<Integer> areaFurniIds = new HashSet<>();
+        for (int xi = x; xi < x + dimX; xi++) {
+            for (int yi = y; yi < y + dimY; yi++) {
+                floor.getFurniOnTile(xi, yi).forEach(item -> areaFurniIds.add(item.getId()));
+            }
+        }
+        exportAreaFurniIds.clear();
+        exportAreaFurniIds.addAll(areaFurniIds);
+
+        List<String> variableIds;
+        synchronized (variablesMap) {
+            variableIds = new ArrayList<>(variablesMap.values());
+        }
+
+        pendingVariableHolderRequests.clear();
+        pendingVariableHolderRequests.addAll(variableIds);
+        totalVariableRequests = variableIds.size();
+        sentVariableRequests = 0;
+        lastVariableActivityTime = System.currentTimeMillis();
+        variableRequestPhaseStarted = true;
+
+        if (variableIds.isEmpty()) {
+            extension.getLogger().log("No user-defined wired variables in this room.", "orange");
+            maybeFinishExportAfterRetrieve();
             return;
         }
 
-        Set<Integer> uniqueFurniIds = new HashSet<>();
-        for (int xi = x; xi < x + dimX; xi++) {
-            for (int yi = y; yi < y + dimY; yi++) {
-                floor.getFurniOnTile(xi, yi).forEach(item -> uniqueFurniIds.add(item.getId()));
-            }
-        }
+        extension.getLogger().log(String.format(
+                "Fetching %d wired variable(s)..", variableIds.size()), "orange");
 
-        pendingFurniVariableRequests.addAll(uniqueFurniIds);
-
-        for (Integer furniId : uniqueFurniIds) {
-            Utils.sleep(35);
-            extension.sendToServer(new HPacket("WiredGetVariablesForObject", HMessage.Direction.TOSERVER, 0, furniId));
-        }
-
-        if (uniqueFurniIds.isEmpty()) {
-            maybeFinishExportAfterRetrieve();
+        for (String variableId : variableIds) {
+            if (state != PresetExportState.FETCHING_UNKNOWN_CONFIGS) return;
+            Utils.sleep((int) VARIABLE_REQUEST_INTERVAL_MS);
+            extension.sendToServer(new HPacket("WiredGetAllVariableHolders", HMessage.Direction.TOSERVER, variableId));
+            sentVariableRequests++;
+            lastVariableActivityTime = System.currentTimeMillis();
         }
     }
 
     private Map<String, Integer> getExportableFurniVariables(int furniId) {
         Map<String, Integer> source = furniVariablesByFurniId.get(furniId);
-        if (source == null || source.isEmpty()) {
-            return Collections.emptyMap();
-        }
+        if (source == null || source.isEmpty()) return Collections.emptyMap();
 
         Map<String, Integer> exportable = new HashMap<>();
         source.forEach((idOrName, value) -> {
             String resolvedName = variableIdToName.getOrDefault(idOrName, idOrName);
-            if (!resolvedName.startsWith("@")) {
+            if (!isDefaultVariableName(resolvedName)) {
                 exportable.put(resolvedName, value);
             }
         });
-
         return exportable;
+    }
+
+    private static boolean isDefaultVariableName(String name) {
+        if (name == null || name.isEmpty()) return true;
+        char c = name.charAt(0);
+        return c == '@' || c == '~';
     }
 
     public void clearCache() {
@@ -1006,6 +1157,10 @@ public class GPresetExporter {
                 variableIdToName = new HashMap<>();
                 furniVariablesByFurniId.clear();
                 pendingFurniVariableRequests.clear();
+                pendingVariableHolderRequests.clear();
+                exportAreaFurniIds.clear();
+                variableRequestPhaseStarted = false;
+                lastVariableActivityTime = 0L;
             }
         }
     }

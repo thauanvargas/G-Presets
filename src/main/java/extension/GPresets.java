@@ -52,7 +52,7 @@ import java.util.stream.Collectors;
 @ExtensionInfo(
         Title =  "G-Presets",
         Description =  "Never do anything twice mod. by TH",
-        Version =  "1.3.3",
+        Version =  "1.3.4",
         Author =  "sirjonasxx"
 )
 public class GPresets extends ExtensionForm {
@@ -92,6 +92,7 @@ public class GPresets extends ExtensionForm {
     public GridPane pcgrid;
     public Label postconfigErrorLbl;
     public CheckBox noExportWiredCbx;
+    public CheckBox noExportFurniVariablesCbx;
     public Slider ratelimiter;
     public CheckBox onTopCbx;
     public CheckBox useRoomFurniCbx;
@@ -149,6 +150,10 @@ public class GPresets extends ExtensionForm {
             Cacher.put("noExportWired", noExportWiredCbx.isSelected());
             updateUI();
         });
+
+        noExportFurniVariablesCbx.selectedProperty().addListener(observable ->
+                Cacher.put("noExportFurniVariables", noExportFurniVariablesCbx.isSelected())
+        );
 
         allowIncompleteBuildsCbx.selectedProperty().addListener(observable ->
                 Cacher.put("allowIncompleteBuilds", allowIncompleteBuildsCbx.isSelected())
@@ -316,6 +321,7 @@ public class GPresets extends ExtensionForm {
         Utils.setExtraSleepTime(cache.optInt("ratelimit", 22));
 
         noExportWiredCbx.setSelected(cache.optBoolean("noExportWired"));
+        noExportFurniVariablesCbx.setSelected(cache.optBoolean("noExportFurniVariables", true));
         noExportWallItemsCbx.setSelected(cache.optBoolean("noExportWallItems"));
         allowIncompleteBuildsCbx.setSelected(cache.optBoolean("allowIncompleteBuilds"));
         useRoomFurniCbx.setSelected(cache.optBoolean("useRoomFurni"));
@@ -588,6 +594,10 @@ public class GPresets extends ExtensionForm {
 
     public boolean shouldExportWired() {
         return !noExportWiredCbx.isSelected();
+    }
+
+    public boolean shouldExportFurniVariables() {
+        return !noExportFurniVariablesCbx.isSelected();
     }
 
     public boolean shouldExportWallItems() {
